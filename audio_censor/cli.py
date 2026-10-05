@@ -14,6 +14,7 @@ from .beep import BeepError, BeepSpec, WAVES
 from .config import default_config_path, load_config, write_template
 from .media import VIDEO_EXTS, MediaError, eprint, language_matches, pick_audio_stream, probe
 from .names import NameDetector
+from .ratings import find_rating, should_skip
 from .render import default_output, remux_with_subtitles, render, render_preview
 from .spans import Span, build_spans, format_table, load_sidecar, save_sidecar, sidecar_path, veto_by_subtitles
 from .subtitles import STYLES, find_subtitle_source, load_cues, scan_cues, write_clean_subtitles
@@ -107,6 +108,15 @@ def scan_file(media: Path, cfg: dict, args: argparse.Namespace, position: str = 
     scan_cfg = cfg["scan"]
     eprint(f"{position}{media.name}: {info.duration / 60:.1f} min, dialogue track {dialogue.describe()}")
 
+    rating, rating_src = find_rating(media, info.tags)
+    if rating and should_skip(rating, scan_cfg.get("skip_ratings", [])) and not getattr(args, "ignore_rating", False):
+        eprint(f"  rated {rating} ({rating_src}); skipping")
+        return [], {"audio_track": dialogue.type_index, "level": cfg["level"], "duration": round(info.duration, 3),
+                    "rating": rating, "rating_source": rating_src, "skipped": f"rated {rating}",
+                    "audio_censored": False, "subtitles": "n/a", "asr": "skipped", "names": []}
+    if rating:
+        eprint(f"  rated {rating} ({rating_src})")
+
     sub_hits, asr_hits, cues = [], [], []
     sub_source = "disabled"
     with tempfile.TemporaryDirectory(prefix="audio-censor-") as tmp:
@@ -115,6 +125,7 @@ def scan_file(media: Path, cfg: dict, args: argparse.Namespace, position: str = 
         base_meta = {
             "audio_track": dialogue.type_index, "level": cfg["level"], "duration": round(info.duration, 3),
             "audio_language": lang, "language_source": how, "audio_censored": censor_audio,
+            "rating": rating, "rating_source": rating_src,
         }
         if not censor_audio:
             eprint(f"  audio language: {lang or 'unknown'} ({how}); not in {', '.join(cfg['languages'])}, "
@@ -325,7 +336,7 @@ def _summary(files: list[Path], counts: dict, args) -> None:
 def cmd_scan(args, cfg) -> int:
     """Phase one: write <file>.censor.json (and the transcript cache) beside every film."""
     files = expand_inputs(args.files, args.recursive)
-    counts = {"scanned": 0, "subtitles only": 0, "already scanned": 0, "failed": 0}
+    counts = {"scanned": 0, "subtitles only": 0, "skipped (rating)": 0, "already scanned": 0, "failed": 0}
     started = time.time()
     for n, media in enumerate(files, 1):
         side = sidecar_path(media)
@@ -339,7 +350,10 @@ def cmd_scan(args, cfg) -> int:
                 continue
             spans, meta = scan_file(media, cfg, args, pos)
             save_sidecar(side, media, spans, meta)
-            if meta.get("audio_censored", True):
+            if meta.get("skipped"):
+                print(f"{media.name}: {meta['skipped']}, skipped -> {side.name}")
+                counts["skipped (rating)"] += 1
+            elif meta.get("audio_censored", True):
                 print(f"{media.name}: {len(spans)} span(s) -> {side.name}")
                 print(format_table(spans))
                 counts["scanned"] += 1
@@ -383,6 +397,10 @@ def cmd_render(args, cfg) -> int:
                 counts["skipped"] += 1
                 continue
             spans, meta = load_sidecar(side)
+            if meta.get("skipped"):
+                eprint(f"{media.name}: {meta['skipped']}, nothing to render")
+                counts["clean already"] += 1
+                continue
             track = args.audio_track if args.audio_track is not None else meta.get("audio_track")
             # mask the same words in subtitles that the scan found, unless --level says otherwise
             cfg["level"] = meta["level"] if not args.level and meta.get("level") in TIERS else base_level
@@ -416,7 +434,9 @@ def cmd_status(args, cfg) -> int:
             state, detail = "unscanned", ""
         else:
             spans, meta = load_sidecar(side)
-            if meta.get("audio_censored") is False:
+            if meta.get("skipped"):
+                state, detail = "nothing to do", meta["skipped"]
+            elif meta.get("audio_censored") is False:
                 detail = f"audio {meta.get('audio_language') or '?'}, subtitles only"
                 done = output.exists() or bool(standalone_outputs(media, cfg, args))
                 state = "rendered" if done else "scanned"
@@ -441,7 +461,7 @@ def cmd_process(args, cfg) -> int:
     files = expand_inputs(args.files, args.recursive)
     if args.output and len(files) > 1:
         raise UserError("-o/--output works with a single input; use --output-dir for batches")
-    counts = {"censored": 0, "subtitles only": 0, "clean already": 0, "skipped": 0, "failed": 0}
+    counts = {"censored": 0, "subtitles only": 0, "clean already": 0, "skipped": 0, "skipped (rating)": 0, "failed": 0}
     for n, media in enumerate(files, 1):
         pos = f"[{n}/{len(files)}] " if _is_batch(args, files) else ""
         try:
@@ -452,7 +472,10 @@ def cmd_process(args, cfg) -> int:
                 continue
             spans, meta = scan_file(media, cfg, args, pos)
             save_sidecar(sidecar_path(media), media, spans, meta)
-            if not meta.get("audio_censored", True):
+            if meta.get("skipped"):
+                counts["skipped (rating)"] += 1
+                out = None
+            elif not meta.get("audio_censored", True):
                 out, status = render_subtitles_only(media, cfg, args, meta)
                 counts[{"written": "subtitles only", "skipped": "skipped", "nothing": "clean already"}[status]] += 1
             else:
@@ -543,6 +566,7 @@ def add_scan_options(p: argparse.ArgumentParser) -> None:
     g.add_argument("--rescan", action="store_true", help="ignore a cached transcript")
     g.add_argument("--no-names", action="store_true", help="censor Dick even when it is a character's name")
     g.add_argument("--any-language", action="store_true", help="censor audio whatever language it is in")
+    g.add_argument("--ignore-rating", action="store_true", help="scan even films rated G / TV-Y / TV-G")
     g.add_argument("--audio-language", metavar="CODE", help="treat the dialogue track as this language (eng, fre ...)")
 
 

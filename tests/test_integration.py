@@ -174,3 +174,16 @@ def test_two_phase_scan_then_render(movie, french_movie, tmp_path, capsys):
 def test_render_batch_skips_unscanned(movie, tmp_path, capsys):
     assert main(["render", str(tmp_path)]) == 0
     assert "1 file(s): 1 not scanned" in capsys.readouterr().out
+
+
+def test_g_rated_film_is_skipped(movie, tmp_path, capsys):
+    movie.with_suffix(".nfo").write_text("<movie><mpaa>Rated G</mpaa></movie>")
+    assert main(["process", str(tmp_path), "--no-asr", "--level", "mild"]) == 0
+    assert "1 skipped (rating)" in capsys.readouterr().out
+    assert not (tmp_path / "movie.clean.mkv").exists()
+    assert '"skipped": "rated G"' in (tmp_path / "movie.censor.json").read_text()
+    assert main(["status", str(tmp_path)]) == 0
+    assert "nothing to do  rated G" in capsys.readouterr().out
+    # override
+    assert main(["process", str(movie), "--no-asr", "--level", "mild", "--ignore-rating"]) == 0
+    assert (tmp_path / "movie.clean.mkv").exists()

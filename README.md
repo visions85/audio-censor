@@ -118,6 +118,16 @@ track muxed in, or `skip`. `--any-language` beeps everything regardless, and
 `--audio-language eng` overrides a wrong tag. Change `languages` in the config to
 censor another language, with your own word list.
 
+### Skipping G-rated titles
+
+Films rated G, TV-Y, TV-Y7 or TV-G are skipped (`scan.skip_ratings`). The rating is
+read from local metadata only: a token in the filename such as `Toy Story (1995) [G].mkv`,
+a Kodi or Jellyfin NFO beside the film (`Movie.nfo` / `movie.nfo` with `<mpaa>` or
+`<certification>`), the show's `tvshow.nfo` for episodes, or iTunes-style container tags.
+Jellyfin and Kodi write NFOs when "save metadata to media folders" is on; Plex does not,
+so Plex-only libraries get the rating from filenames or tags. Films with no rating
+anywhere are scanned normally. `--ignore-rating` overrides the skip.
+
 ## Configuration
 
 `audio-censor init-config` writes `~/.config/audio-censor/config.toml`. Every key is

@@ -6,7 +6,7 @@ import json
 import shutil
 import subprocess
 import sys
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from pathlib import Path
 
 VIDEO_EXTS = {".mkv", ".mp4", ".m4v", ".mov", ".avi", ".webm", ".ts", ".mpg", ".mpeg", ".wmv", ".flv"}
@@ -47,6 +47,7 @@ class MediaInfo:
     path: Path
     duration: float
     streams: list[Stream]
+    tags: dict = field(default_factory=dict)      # container-level tags (title, iTunEXTC ...)
 
     def of_type(self, kind: str) -> list[Stream]:
         return [s for s in self.streams if s.codec_type == kind]
@@ -99,7 +100,7 @@ def probe(path: str | Path) -> MediaInfo:
                 duration = max(duration, float(raw.get("duration") or 0))
             except (TypeError, ValueError):
                 pass
-    return MediaInfo(path, duration, streams)
+    return MediaInfo(path, duration, streams, dict((data.get("format") or {}).get("tags") or {}))
 
 
 def language_matches(lang: str, preferred: list[str]) -> bool:
