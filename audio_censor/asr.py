@@ -68,6 +68,22 @@ def _resolve_device(device: str, compute_type: str) -> tuple[str, str]:
 _MODELS: dict = {}
 
 
+def load_wav(path: Path):
+    """16 kHz mono PCM WAV -> float32 numpy array in [-1, 1].
+
+    faster-whisper decodes files through PyAV, whose API changes between releases have
+    broken it more than once (``av.open() got an unexpected keyword argument``). We
+    already produce the exact format Whisper wants with ffmpeg, so hand it the samples.
+    """
+    import wave
+    import numpy as np
+    with wave.open(str(path), "rb") as wf:
+        if wf.getnchannels() != 1 or wf.getframerate() != 16000 or wf.getsampwidth() != 2:
+            raise RuntimeError(f"{path.name}: expected 16 kHz mono 16-bit PCM")
+        frames = wf.readframes(wf.getnframes())
+    return np.frombuffer(frames, dtype=np.int16).astype(np.float32) / 32768.0
+
+
 def _get_model(cfg: dict):
     """Load (once per process) the configured faster-whisper model."""
     try:
@@ -106,7 +122,7 @@ def detect_language(media: Path, audio_track: int, duration: float, cfg: dict, w
     for i, start in enumerate(starts):
         clip = work / f"langclip{i}.wav"
         extract_audio_clip(media, audio_track, clip, start, min(clip_len, max(1.0, duration - start)))
-        _segments, info = model.transcribe(str(clip), beam_size=1, vad_filter=True, word_timestamps=False)
+        _segments, info = model.transcribe(load_wav(clip), beam_size=1, vad_filter=True, word_timestamps=False)
         if info.language:
             votes[info.language] = votes.get(info.language, 0.0) + float(info.language_probability or 0.0)
     if not votes:
@@ -124,7 +140,7 @@ def transcribe(wav: Path, cfg: dict, duration: float = 0.0, progress: bool = Tru
     if progress:
         eprint("  preparing audio (voice activity detection) ...", end="\r")
     segments, info = model.transcribe(
-        str(wav),
+        load_wav(wav),
         language=language,
         beam_size=int(acfg.get("beam_size", 5)),
         word_timestamps=True,

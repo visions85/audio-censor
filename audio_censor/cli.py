@@ -369,11 +369,20 @@ def _is_batch(args, files: list[Path]) -> bool:
 
 
 def _batch_guard(files: list[Path], args, counts: dict, media: Path, exc: Exception) -> None:
-    """Report a per-file failure and keep going, unless told (or a single file) to stop."""
+    """Report a per-file failure and keep going, unless told (or a single file) to stop.
+
+    Any exception counts: a crash inside a library on one odd file must not end a
+    5000-file overnight run. -v prints the traceback.
+    """
     if getattr(args, "stop_on_error", False) or not _is_batch(args, files):
         raise exc
     counts["failed"] += 1
-    eprint(f"error: {media.name}: {exc}")
+    known = isinstance(exc, (MediaError, BeepError, UserError, RuntimeError, OSError))
+    eprint(f"error: {media.name}: {exc if known else f'{type(exc).__name__}: {exc}'}")
+    if getattr(args, "verbose", False) or not known:
+        import traceback
+        tb = traceback.format_exception(exc)
+        eprint("".join(tb[-3:]).rstrip() if not getattr(args, "verbose", False) else "".join(tb).rstrip())
 
 
 def _summary(files: list[Path], counts: dict, args) -> None:
@@ -408,7 +417,7 @@ def cmd_scan(args, cfg) -> int:
             else:
                 print(f"{media.name}: audio not censored ({meta.get('audio_language') or 'unknown'}) -> {side.name}")
                 counts["subtitles only"] += 1
-        except (MediaError, BeepError, UserError, RuntimeError) as exc:
+        except Exception as exc:  # noqa: BLE001 - see _batch_guard
             _batch_guard(files, args, counts, media, exc)
         if _is_batch(args, files):
             done = counts["scanned"] + counts["subtitles only"] + counts["failed"]
@@ -462,7 +471,7 @@ def cmd_render(args, cfg) -> int:
                 counts["rendered" if spans else "clean already"] += 1
             if out and not args.dry_run:
                 print(f"wrote {out}")
-        except (MediaError, BeepError, UserError, RuntimeError) as exc:
+        except Exception as exc:  # noqa: BLE001 - see _batch_guard
             _batch_guard(files, args, counts, media, exc)
         if _is_batch(args, files):
             eprint("")
@@ -532,7 +541,7 @@ def cmd_process(args, cfg) -> int:
                 counts["censored" if spans else "clean already"] += 1
             if out and not args.dry_run:
                 print(f"wrote {out}")
-        except (MediaError, BeepError, UserError, RuntimeError) as exc:
+        except Exception as exc:  # noqa: BLE001 - see _batch_guard
             _batch_guard(files, args, counts, media, exc)
         if _is_batch(args, files):
             eprint("")

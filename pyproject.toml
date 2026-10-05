@@ -14,7 +14,7 @@ dependencies = [
 ]
 
 [project.optional-dependencies]
-asr = ["faster-whisper>=1.0"]
+asr = ["faster-whisper>=1.0", "numpy"]
 dev = ["pytest>=7"]
 
 [project.scripts]

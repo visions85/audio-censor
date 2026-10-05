@@ -112,3 +112,15 @@ def test_subtitles_veto_asr_homophone():
     out = veto_by_subtitles(asr, cues, table)
     assert [h.name_use for h in out] == [True, False, False]
     assert len(build_spans([], out, CFG)) == 2
+
+
+def test_load_wav_roundtrip(tmp_path):
+    import wave
+    import numpy as np
+    from audio_censor.asr import load_wav
+    path = tmp_path / "a.wav"
+    samples = (np.sin(np.linspace(0, 100, 16000)) * 20000).astype(np.int16)
+    with wave.open(str(path), "wb") as wf:
+        wf.setnchannels(1); wf.setsampwidth(2); wf.setframerate(16000); wf.writeframes(samples.tobytes())
+    audio = load_wav(path)
+    assert audio.dtype == np.float32 and len(audio) == 16000 and abs(audio.max() - 20000 / 32768) < 1e-3

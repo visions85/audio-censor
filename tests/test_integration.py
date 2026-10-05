@@ -187,3 +187,20 @@ def test_g_rated_film_is_skipped(movie, tmp_path, capsys):
     # override
     assert main(["process", str(movie), "--no-asr", "--level", "mild", "--ignore-rating"]) == 0
     assert (tmp_path / "movie.clean.mkv").exists()
+
+
+def test_batch_survives_unexpected_exception(movie, french_movie, tmp_path, capsys, monkeypatch):
+    import audio_censor.cli as cli
+    real = cli.scan_file
+
+    def flaky(media, cfg, args, position=""):
+        if media.name == "french.mkv":
+            raise TypeError("open() got an unexpected keyword argument 'metadata_errors'")
+        return real(media, cfg, args, position)
+
+    monkeypatch.setattr(cli, "scan_file", flaky)
+    assert main(["scan", str(tmp_path), "--no-asr", "--level", "mild"]) == 1      # non-zero: something failed
+    out, err = capsys.readouterr()
+    assert "error: french.mkv: TypeError: open() got an unexpected keyword" in err
+    assert "2 file(s): 1 scanned, 1 failed" in out
+    assert (tmp_path / "movie.censor.json").exists()                               # the other file was still done
