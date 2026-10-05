@@ -17,13 +17,30 @@ Detection combines two sources:
 
 ## Install
 
+Prerequisites: Python 3.11 or newer, pip, and ffmpeg.
+
 ```bash
-sudo apt install ffmpeg            # or your distro's equivalent
-pipx install 'audio-censor[asr]'   # with speech recognition
-pipx install audio-censor          # subtitles only
+# Ubuntu / Debian / Mint
+sudo apt update && sudo apt install python3-pip python3-venv ffmpeg
+# Fedora
+sudo dnf install python3-pip ffmpeg
+# Arch
+sudo pacman -S python-pip ffmpeg
 ```
 
-From a checkout: `pip install -e '.[asr,dev]'`.
+Then, from a checkout of this repository, install into a virtual environment
+(Debian and Ubuntu refuse a system-wide `pip install`):
+
+```bash
+python3 -m venv .venv
+source .venv/bin/activate          # repeat in each new terminal
+pip install -e '.[asr]'            # with speech recognition
+pip install -e .                   # subtitles only, much smaller
+audio-censor --version
+```
+
+Alternatively `sudo apt install pipx` and `pipx install -e '.[asr]'` puts the
+`audio-censor` command on your path permanently without activating anything.
 
 Speech recognition runs on the CPU by default (roughly a quarter of real time with
 the `small` model, so about 30 minutes for a 2-hour film). With an NVIDIA GPU it
