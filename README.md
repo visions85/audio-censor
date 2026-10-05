@@ -124,9 +124,19 @@ Films rated G, TV-Y, TV-Y7 or TV-G are skipped (`scan.skip_ratings`). The rating
 read from local metadata only: a token in the filename such as `Toy Story (1995) [G].mkv`,
 a Kodi or Jellyfin NFO beside the film (`Movie.nfo` / `movie.nfo` with `<mpaa>` or
 `<certification>`), the show's `tvshow.nfo` for episodes, or iTunes-style container tags.
-Jellyfin and Kodi write NFOs when "save metadata to media folders" is on; Plex does not,
-so Plex-only libraries get the rating from filenames or tags. Films with no rating
-anywhere are scanned normally. `--ignore-rating` overrides the skip.
+Jellyfin and Kodi write NFOs when "save metadata to media folders" is on. Plex does
+not, so for a Plex library the tool can ask the server instead:
+
+```bash
+export PLEX_URL=https://plex.example.com:32400
+export PLEX_TOKEN=...          # or put both under [plex] in the config, chmod 600
+```
+
+Every movie and episode Plex knows is fetched once (cached for six hours,
+`--refresh-plex` to force) and matched to your files by path, falling back to the
+parent folder plus filename when Plex sees the files under a different mount
+(`[plex.path_map]` handles that explicitly). Films with no rating anywhere are scanned
+normally. `--ignore-rating` overrides the skip.
 
 ## Configuration
 

@@ -75,8 +75,8 @@ def from_tags(tags: dict) -> str:
     return ""
 
 
-def find_rating(media: Path, tags: dict | None = None) -> tuple[str, str]:
-    """-> (rating or "", where it came from)."""
+def find_rating(media: Path, tags: dict | None = None, lookup=None) -> tuple[str, str]:
+    """-> (rating or "", where it came from). `lookup(media) -> rating` is an extra source (Plex)."""
     r = from_filename(media)
     if r:
         return r, "filename"
@@ -87,6 +87,10 @@ def find_rating(media: Path, tags: dict | None = None) -> tuple[str, str]:
     r = from_tags(tags or {})
     if r:
         return r, "container tags"
+    if lookup is not None:
+        r = normalize(lookup(media) or "")
+        if r:
+            return r, "plex"
     return "", ""
 
 

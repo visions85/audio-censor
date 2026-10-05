@@ -14,6 +14,7 @@ from .beep import BeepError, BeepSpec, WAVES
 from .config import default_config_path, load_config, write_template
 from .media import VIDEO_EXTS, MediaError, eprint, language_matches, pick_audio_stream, probe
 from .names import NameDetector
+from .plex import PlexError, PlexRatings
 from .ratings import find_rating, should_skip
 from .render import default_output, remux_with_subtitles, render, render_preview
 from .spans import Span, build_spans, format_table, load_sidecar, save_sidecar, sidecar_path, veto_by_subtitles
@@ -108,7 +109,7 @@ def scan_file(media: Path, cfg: dict, args: argparse.Namespace, position: str = 
     scan_cfg = cfg["scan"]
     eprint(f"{position}{media.name}: {info.duration / 60:.1f} min, dialogue track {dialogue.describe()}")
 
-    rating, rating_src = find_rating(media, info.tags)
+    rating, rating_src = find_rating(media, info.tags, _plex_lookup(cfg, args))
     if rating and should_skip(rating, scan_cfg.get("skip_ratings", [])) and not getattr(args, "ignore_rating", False):
         eprint(f"  rated {rating} ({rating_src}); skipping")
         return [], {"audio_track": dialogue.type_index, "level": cfg["level"], "duration": round(info.duration, 3),
@@ -182,6 +183,32 @@ def scan_file(media: Path, cfg: dict, args: argparse.Namespace, position: str = 
     spans = build_spans(sub_hits, asr_hits, cfg, info.duration)
     meta = {**base_meta, "subtitles": sub_source, "asr": asr_source, "names": sorted(detector.names)}
     return spans, meta
+
+
+_PLEX: dict = {}
+
+
+def _plex_lookup(cfg: dict, args):
+    """A rating_for callable backed by the configured Plex server, built once per run (or None)."""
+    if "lookup" not in _PLEX:
+        _PLEX["lookup"] = None
+        if not cfg["scan"].get("skip_ratings"):
+            return None
+        try:
+            plex = PlexRatings.from_config(cfg, refresh=getattr(args, "refresh_plex", False))
+        except PlexError as exc:
+            eprint(f"  plex: {exc}")
+            plex = None
+        if plex is not None:
+            def lookup(media: Path) -> str:
+                try:
+                    return plex.rating_for(media)
+                except PlexError as exc:
+                    eprint(f"  plex: {exc}; ratings unavailable for this run")
+                    _PLEX["lookup"] = None
+                    return ""
+            _PLEX["lookup"] = lookup
+    return _PLEX["lookup"]
 
 
 def decide_audio_language(media: Path, info, dialogue, cfg: dict, args, work: Path) -> tuple[bool, str, str]:
@@ -567,6 +594,7 @@ def add_scan_options(p: argparse.ArgumentParser) -> None:
     g.add_argument("--no-names", action="store_true", help="censor Dick even when it is a character's name")
     g.add_argument("--any-language", action="store_true", help="censor audio whatever language it is in")
     g.add_argument("--ignore-rating", action="store_true", help="scan even films rated G / TV-Y / TV-G")
+    g.add_argument("--refresh-plex", action="store_true", help="re-fetch ratings from Plex instead of the 6h cache")
     g.add_argument("--audio-language", metavar="CODE", help="treat the dialogue track as this language (eng, fre ...)")
 
 

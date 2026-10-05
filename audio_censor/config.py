@@ -77,6 +77,11 @@ DEFAULTS: dict = {
         "standalone": "sidecar",       # non-English audio: sidecar (<file>.<lang>.clean.srt) | remux | skip
         "standalone_suffix": ".clean",
     },
+    "plex": {
+        "url": "",                     # e.g. "https://plex.example.com:32400"; or env PLEX_URL
+        "token": "",                   # X-Plex-Token; prefer env PLEX_TOKEN over writing it here
+        "path_map": {},                # {"/media/movies": "/data/movies"} when Plex sees other paths
+    },
     "names": {
         "detect": True,                # treat capitalized mid-sentence uses (Dick, Fagin) as names
         "min_occurrences": 2,          # capitalized uses needed before ambiguous spots count as the name
@@ -145,6 +150,13 @@ embed = true                # also add a "Clean" subtitle track inside the file
 set_default = false
 standalone = "sidecar"      # foreign-language audio: sidecar | remux | skip
 standalone_suffix = ".clean"
+
+[plex]
+# Ratings for the G-rated skip, when your library has no NFO files (Plex never writes them).
+# url = "https://plex.example.com:32400"
+# token = ""                # or export PLEX_TOKEN=... ; keep this file private (chmod 600)
+# [plex.path_map]
+# "/media/movies" = "/data/movies"   # local path -> the path Plex sees, if they differ
 
 [names]
 detect = true               # "Dick" mid-sentence is a character, "dick" is not
