@@ -120,7 +120,10 @@ def transcribe(wav: Path, cfg: dict, duration: float = 0.0, progress: bool = Tru
     model = _get_model(cfg)
 
     language = acfg.get("language") or None
-    segments, _info = model.transcribe(
+    t0 = time.time()
+    if progress:
+        eprint("  preparing audio (voice activity detection) ...", end="\r")
+    segments, info = model.transcribe(
         str(wav),
         language=language,
         beam_size=int(acfg.get("beam_size", 5)),
@@ -129,21 +132,35 @@ def transcribe(wav: Path, cfg: dict, duration: float = 0.0, progress: bool = Tru
         condition_on_previous_text=False,
         initial_prompt=acfg.get("initial_prompt") or None,
     )
+    if progress:
+        eprint(f"  transcribing ({info.language}, {_fmt_secs(duration)} of audio) ...                 ")
     words: list[Word] = []
-    t0 = time.time()
-    last_report = t0
+    t1 = time.time()
+    last_report = 0.0
     for seg in segments:
         for w in seg.words or []:
             words.append(Word(float(w.start), float(w.end), w.word, float(getattr(w, "probability", 1.0))))
         now = time.time()
-        if progress and duration and now - last_report > 5:
+        if progress and duration and now - last_report > 2:
             pct = min(100.0, 100.0 * seg.end / duration)
-            rate = seg.end / max(1e-6, now - t0)
-            eprint(f"  transcribing {pct:5.1f}%  ({rate:.1f}x realtime)", end="\r")
+            elapsed = now - t1
+            rate = seg.end / max(1e-6, elapsed)
+            eta = (duration - seg.end) / max(1e-6, rate)
+            eprint(f"  transcribing {pct:5.1f}%  {_fmt_secs(elapsed)} elapsed, ~{_fmt_secs(eta)} left, "
+                   f"{rate:.0f}x realtime, {len(words)} words     ", end="\r")
             last_report = now
     if progress:
-        eprint(f"  transcribed {len(words)} words in {time.time() - t0:.0f}s        ")
+        eprint(f"  transcribed {len(words)} words in {_fmt_secs(time.time() - t0)}" + " " * 50)
     return words
+
+
+def _fmt_secs(secs: float) -> str:
+    secs = max(0, int(secs))
+    if secs >= 3600:
+        return f"{secs // 3600}h{(secs % 3600) // 60:02d}m"
+    if secs >= 60:
+        return f"{secs // 60}m{secs % 60:02d}s"
+    return f"{secs}s"
 
 
 def scan_words(words: list[Word], matcher: Matcher, detector=None) -> list[Hit]:

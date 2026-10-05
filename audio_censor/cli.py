@@ -6,6 +6,7 @@ import argparse
 import os
 import sys
 import tempfile
+import time
 from pathlib import Path
 
 from . import __version__, asr
@@ -97,14 +98,14 @@ def apply_overrides(cfg: dict, args: argparse.Namespace) -> dict:
     return cfg
 
 
-def scan_file(media: Path, cfg: dict, args: argparse.Namespace) -> tuple[list[Span], dict]:
+def scan_file(media: Path, cfg: dict, args: argparse.Namespace, position: str = "") -> tuple[list[Span], dict]:
     """Run subtitle + ASR scans and return merged spans plus metadata."""
     info = probe(media)
     dialogue = pick_audio_stream(info, cfg["languages"], getattr(args, "audio_track", None))
     matcher = Matcher.from_config(cfg)
     detector = NameDetector.from_config(cfg)
     scan_cfg = cfg["scan"]
-    eprint(f"{media.name}: {info.duration / 60:.1f} min, dialogue track {dialogue.describe()}")
+    eprint(f"{position}{media.name}: {info.duration / 60:.1f} min, dialogue track {dialogue.describe()}")
 
     sub_hits, asr_hits = [], []
     sub_source = "disabled"
@@ -321,16 +322,18 @@ def cmd_scan(args, cfg) -> int:
     """Phase one: write <file>.censor.json (and the transcript cache) beside every film."""
     files = expand_inputs(args.files, args.recursive)
     counts = {"scanned": 0, "subtitles only": 0, "already scanned": 0, "failed": 0}
-    for media in files:
+    started = time.time()
+    for n, media in enumerate(files, 1):
         side = sidecar_path(media)
+        pos = f"[{n}/{len(files)}] " if _is_batch(args, files) else ""
         try:
             if side.exists() and not args.overwrite and not args.rescan:
                 spans, meta = load_sidecar(side)
-                eprint(f"{media.name}: already scanned ({len(spans)} span(s), level {meta.get('level')}); "
+                eprint(f"{pos}{media.name}: already scanned ({len(spans)} span(s), level {meta.get('level')}); "
                        "--overwrite to redo")
                 counts["already scanned"] += 1
                 continue
-            spans, meta = scan_file(media, cfg, args)
+            spans, meta = scan_file(media, cfg, args, pos)
             save_sidecar(side, media, spans, meta)
             if meta.get("audio_censored", True):
                 print(f"{media.name}: {len(spans)} span(s) -> {side.name}")
@@ -342,7 +345,12 @@ def cmd_scan(args, cfg) -> int:
         except (MediaError, BeepError, UserError, RuntimeError) as exc:
             _batch_guard(files, args, counts, media, exc)
         if _is_batch(args, files):
-            eprint("")
+            done = counts["scanned"] + counts["subtitles only"] + counts["failed"]
+            if done and n < len(files):
+                per = (time.time() - started) / done
+                eprint(f"  {len(files) - n} file(s) left, ~{int(per * (len(files) - n) / 60)} min at this pace\n")
+            else:
+                eprint("")
     _summary(files, counts, args)
     return 1 if counts["failed"] else 0
 
@@ -430,14 +438,15 @@ def cmd_process(args, cfg) -> int:
     if args.output and len(files) > 1:
         raise UserError("-o/--output works with a single input; use --output-dir for batches")
     counts = {"censored": 0, "subtitles only": 0, "clean already": 0, "skipped": 0, "failed": 0}
-    for media in files:
+    for n, media in enumerate(files, 1):
+        pos = f"[{n}/{len(files)}] " if _is_batch(args, files) else ""
         try:
             output = resolve_output(media, cfg, args)
             if output.exists() and not args.overwrite and not args.dry_run:
-                eprint(f"{media.name}: {output.name} exists, skipping (--overwrite to redo)")
+                eprint(f"{pos}{media.name}: {output.name} exists, skipping (--overwrite to redo)")
                 counts["skipped"] += 1
                 continue
-            spans, meta = scan_file(media, cfg, args)
+            spans, meta = scan_file(media, cfg, args, pos)
             save_sidecar(sidecar_path(media), media, spans, meta)
             if not meta.get("audio_censored", True):
                 out, status = render_subtitles_only(media, cfg, args, meta)
