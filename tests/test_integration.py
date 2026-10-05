@@ -138,3 +138,39 @@ def test_batch_skips_existing_and_summarizes(movie, tmp_path, capsys):
     assert main(["process", str(tmp_path), "--no-asr", "--level", "mild"]) == 0
     err = capsys.readouterr().err
     assert "movie.clean.mkv exists, skipping" in err
+
+
+def test_two_phase_scan_then_render(movie, french_movie, tmp_path, capsys):
+    # phase one: scan everything, writes span files only
+    assert main(["scan", str(tmp_path), "--no-asr", "--level", "mild"]) == 0
+    assert (tmp_path / "movie.censor.json").exists() and (tmp_path / "french.censor.json").exists()
+    assert not list(tmp_path.glob("*.clean.*"))
+    out = capsys.readouterr().out
+    assert "2 file(s): 1 scanned, 1 subtitles only" in out
+
+    assert main(["status", str(tmp_path)]) == 0
+    out = capsys.readouterr().out
+    assert "movie.mkv" in out and "scanned" in out and "2 file(s): 2 scanned" in out
+
+    # scanning again is a no-op
+    assert main(["scan", str(tmp_path), "--no-asr", "--level", "mild"]) == 0
+    assert "2 already scanned" in capsys.readouterr().out
+
+    # phase two: render from the span files, with a beep chosen now
+    assert main(["render", str(tmp_path), "--wave", "square", "--frequency", "600"]) == 0
+    out = capsys.readouterr().out
+    assert "2 file(s): 1 rendered, 1 subtitles only" in out
+    assert (tmp_path / "movie.clean.mkv").exists() and (tmp_path / "french.en.clean.srt").exists()
+    assert probe(tmp_path / "movie.clean.mkv").of_type("audio")[1].title == "Clean (beeped)"
+
+    assert main(["status", str(tmp_path)]) == 0
+    assert "2 file(s): 2 rendered" in capsys.readouterr().out
+
+    # rendering again skips everything
+    assert main(["render", str(tmp_path)]) == 0
+    assert "2 skipped" in capsys.readouterr().out
+
+
+def test_render_batch_skips_unscanned(movie, tmp_path, capsys):
+    assert main(["render", str(tmp_path)]) == 0
+    assert "1 file(s): 1 not scanned" in capsys.readouterr().out

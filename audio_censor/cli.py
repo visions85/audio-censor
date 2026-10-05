@@ -200,13 +200,24 @@ def resolve_output(media: Path, cfg: dict, args) -> Path:
     return default_output(media, cfg, out_dir)
 
 
-def render_subtitles_only(media: Path, cfg: dict, args, meta: dict) -> Path | None:
-    """Foreign-language audio: censor the English subtitles without touching the audio."""
+def standalone_outputs(media: Path, cfg: dict, args) -> list[Path]:
+    """Clean subtitle files already written beside a foreign-language film (any language/format)."""
+    suffix = (cfg["subtitles"].get("standalone_suffix") or ".clean").strip(".")
+    return sorted(p for p in media.parent.glob(f"{media.stem}.*")
+                  if p.suffix.lower() in (".srt", ".ass", ".ssa", ".vtt")
+                  and suffix in p.name[len(media.stem):].lower().split("."))
+
+
+def render_subtitles_only(media: Path, cfg: dict, args, meta: dict) -> tuple[Path | None, str]:
+    """Foreign-language audio: censor the English subtitles without touching the audio.
+
+    Returns (path written, status) with status one of written / skipped / nothing.
+    """
     sub_cfg = cfg["subtitles"]
     mode = sub_cfg.get("standalone", "sidecar")
     if not sub_cfg.get("clean", True) or mode == "skip":
         eprint("  clean subtitles: disabled for non-English audio, nothing to do")
-        return None
+        return None, "nothing"
     info = probe(media)
     dry_run = getattr(args, "dry_run", False)
     with tempfile.TemporaryDirectory(prefix="audio-censor-") as tmp:
@@ -215,10 +226,10 @@ def render_subtitles_only(media: Path, cfg: dict, args, meta: dict) -> Path | No
         src = find_subtitle_source(media, info, cfg["languages"], work, explicit, _ignore_tags(cfg))
         if src is None:
             eprint("  clean subtitles: no subtitles found, nothing to do")
-            return None
+            return None, "nothing"
         if src.language and not language_matches(src.language, cfg["languages"]):
             eprint(f"  clean subtitles: only {src.language} subtitles found, nothing to do")
-            return None
+            return None, "nothing"
         lang = src.language
         suffix = sub_cfg.get("standalone_suffix", ".clean")
         if mode == "sidecar":
@@ -230,17 +241,17 @@ def render_subtitles_only(media: Path, cfg: dict, args, meta: dict) -> Path | No
             target = output.parent / name if sub_cfg.get("sidecar", True) else work / name
         if dry_run:
             eprint(f"  clean subtitles: would write {target}")
-            return target
+            return target, "written"
         if mode == "sidecar" and target.exists() and not getattr(args, "overwrite", False):
             eprint(f"  clean subtitles: {target.name} exists, skipping (--overwrite to redo)")
-            return None
+            return None, "skipped"
         count = write_clean_subtitles(src, Matcher.from_config(cfg), target, sub_cfg.get("style", "asterisks"),
                                       sub_cfg.get("replacement", "[BLEEP]"), NameDetector.from_config(cfg))
         eprint(f"  clean subtitles: {count} word(s) masked from {src.description} -> {target.name}")
         if mode == "remux":
             return remux_with_subtitles(media, info, target, lang, cfg, output, dry_run=dry_run,
-                                        verbose=getattr(args, "verbose", False))
-        return target
+                                        verbose=getattr(args, "verbose", False)), "written"
+        return target, "written"
 
 
 def render_file(media: Path, spans: list[Span], cfg: dict, args: argparse.Namespace,
@@ -288,33 +299,129 @@ def prepare_clean_subtitles(media: Path, info, cfg: dict, args, output: Path, wo
 
 # ----------------------------------------------------------------------------- commands
 
+def _is_batch(args, files: list[Path]) -> bool:
+    """A directory argument means batch semantics even if it holds a single file."""
+    return len(files) > 1 or any(Path(f).expanduser().is_dir() for f in args.files)
+
+
+def _batch_guard(files: list[Path], args, counts: dict, media: Path, exc: Exception) -> None:
+    """Report a per-file failure and keep going, unless told (or a single file) to stop."""
+    if getattr(args, "stop_on_error", False) or not _is_batch(args, files):
+        raise exc
+    counts["failed"] += 1
+    eprint(f"error: {media.name}: {exc}")
+
+
+def _summary(files: list[Path], counts: dict, args) -> None:
+    if _is_batch(args, files):
+        print(f"{len(files)} file(s): " + ", ".join(f"{v} {k}" for k, v in counts.items() if v))
+
+
 def cmd_scan(args, cfg) -> int:
-    for media in expand_inputs(args.files, args.recursive):
-        spans, meta = scan_file(media, cfg, args)
+    """Phase one: write <file>.censor.json (and the transcript cache) beside every film."""
+    files = expand_inputs(args.files, args.recursive)
+    counts = {"scanned": 0, "subtitles only": 0, "already scanned": 0, "failed": 0}
+    for media in files:
         side = sidecar_path(media)
-        save_sidecar(side, media, spans, meta)
-        print(f"\n{media.name}: {len(spans)} span(s) -> {side.name}")
-        print(format_table(spans))
-    return 0
+        try:
+            if side.exists() and not args.overwrite and not args.rescan:
+                spans, meta = load_sidecar(side)
+                eprint(f"{media.name}: already scanned ({len(spans)} span(s), level {meta.get('level')}); "
+                       "--overwrite to redo")
+                counts["already scanned"] += 1
+                continue
+            spans, meta = scan_file(media, cfg, args)
+            save_sidecar(side, media, spans, meta)
+            if meta.get("audio_censored", True):
+                print(f"{media.name}: {len(spans)} span(s) -> {side.name}")
+                print(format_table(spans))
+                counts["scanned"] += 1
+            else:
+                print(f"{media.name}: audio not censored ({meta.get('audio_language') or 'unknown'}) -> {side.name}")
+                counts["subtitles only"] += 1
+        except (MediaError, BeepError, UserError, RuntimeError) as exc:
+            _batch_guard(files, args, counts, media, exc)
+        if _is_batch(args, files):
+            eprint("")
+    _summary(files, counts, args)
+    return 1 if counts["failed"] else 0
 
 
 def cmd_render(args, cfg) -> int:
-    for media in expand_inputs(args.files, args.recursive):
-        side = Path(args.spans).expanduser() if args.spans else sidecar_path(media)
+    """Phase two: remux from the span files written by scan. Unscanned files are skipped."""
+    files = expand_inputs(args.files, args.recursive)
+    if args.spans and len(files) > 1:
+        raise UserError("--spans works with a single input")
+    if args.output and len(files) > 1:
+        raise UserError("-o/--output works with a single input; use --output-dir for batches")
+    counts = {"rendered": 0, "subtitles only": 0, "clean already": 0, "not scanned": 0, "skipped": 0, "failed": 0}
+    base_level = cfg["level"]
+    for media in files:
+        try:
+            side = Path(args.spans).expanduser() if args.spans else sidecar_path(media)
+            if not side.exists():
+                if not _is_batch(args, files):
+                    raise UserError(f"no span file {side.name}; run 'audio-censor scan' first")
+                eprint(f"{media.name}: not scanned yet, skipping")
+                counts["not scanned"] += 1
+                continue
+            output = resolve_output(media, cfg, args)
+            if output.exists() and not args.overwrite and not args.dry_run:
+                eprint(f"{media.name}: {output.name} exists, skipping (--overwrite to redo)")
+                counts["skipped"] += 1
+                continue
+            spans, meta = load_sidecar(side)
+            track = args.audio_track if args.audio_track is not None else meta.get("audio_track")
+            # mask the same words in subtitles that the scan found, unless --level says otherwise
+            cfg["level"] = meta["level"] if not args.level and meta.get("level") in TIERS else base_level
+            eprint(f"{media.name}: {len(spans)} span(s) from {side.name}, level {cfg['level']}")
+            if meta.get("audio_censored") is False:
+                eprint(f"  audio language {meta.get('audio_language') or 'unknown'}: subtitles only")
+                out, status = render_subtitles_only(media, cfg, args, meta)
+                counts[{"written": "subtitles only", "skipped": "skipped", "nothing": "clean already"}[status]] += 1
+            else:
+                out = render_file(media, spans, cfg, args, track)
+                counts["rendered" if spans else "clean already"] += 1
+            if out and not args.dry_run:
+                print(f"wrote {out}")
+        except (MediaError, BeepError, UserError, RuntimeError) as exc:
+            _batch_guard(files, args, counts, media, exc)
+        if _is_batch(args, files):
+            eprint("")
+    _summary(files, counts, args)
+    return 1 if counts["failed"] else 0
+
+
+def cmd_status(args, cfg) -> int:
+    """Where every file stands: unscanned, scanned (N spans), or rendered."""
+    files = expand_inputs(args.files, args.recursive)
+    rows = []
+    totals = {"unscanned": 0, "scanned": 0, "rendered": 0, "nothing to do": 0}
+    for media in files:
+        side = sidecar_path(media)
+        output = resolve_output(media, cfg, args)
         if not side.exists():
-            raise UserError(f"no span file {side.name}; run 'audio-censor scan' first")
-        spans, meta = load_sidecar(side)
-        track = args.audio_track if args.audio_track is not None else meta.get("audio_track")
-        if not args.level and meta.get("level") in TIERS:
-            cfg["level"] = meta["level"]      # mask the same words in subtitles that the scan found
-        eprint(f"{media.name}: {len(spans)} span(s) from {side.name}, level {cfg['level']}")
-        if meta.get("audio_censored") is False:
-            eprint(f"  audio language {meta.get('audio_language') or 'unknown'}: subtitles only")
-            out = render_subtitles_only(media, cfg, args, meta)
+            state, detail = "unscanned", ""
         else:
-            out = render_file(media, spans, cfg, args, track)
-        if out and not args.dry_run:
-            print(f"wrote {out}")
+            spans, meta = load_sidecar(side)
+            if meta.get("audio_censored") is False:
+                detail = f"audio {meta.get('audio_language') or '?'}, subtitles only"
+                done = output.exists() or bool(standalone_outputs(media, cfg, args))
+                state = "rendered" if done else "scanned"
+            else:
+                detail = f"{len(spans)} span(s), level {meta.get('level')}"
+                if meta.get("asr") in ("skipped", "unavailable", "disabled"):
+                    detail += ", no asr"
+                state = "rendered" if output.exists() else ("scanned" if spans else "nothing to do")
+        totals[state] += 1
+        rows.append((media, state, detail))
+    def label(m: Path) -> str:
+        return str(m.relative_to(Path.cwd())) if m.is_relative_to(Path.cwd()) else m.name
+    width = max((len(label(m)) for m, _, _ in rows), default=10)
+    for media, state, detail in rows:
+        print(f"{label(media):<{width}}  {state:<13}  {detail}")
+    if _is_batch(args, files):
+        print(f"\n{len(files)} file(s): " + ", ".join(f"{v} {k}" for k, v in totals.items() if v))
     return 0
 
 
@@ -333,8 +440,8 @@ def cmd_process(args, cfg) -> int:
             spans, meta = scan_file(media, cfg, args)
             save_sidecar(sidecar_path(media), media, spans, meta)
             if not meta.get("audio_censored", True):
-                out = render_subtitles_only(media, cfg, args, meta)
-                counts["subtitles only"] += 1
+                out, status = render_subtitles_only(media, cfg, args, meta)
+                counts[{"written": "subtitles only", "skipped": "skipped", "nothing": "clean already"}[status]] += 1
             else:
                 print(format_table(spans))
                 out = render_file(media, spans, cfg, args, meta["audio_track"])
@@ -342,15 +449,10 @@ def cmd_process(args, cfg) -> int:
             if out and not args.dry_run:
                 print(f"wrote {out}")
         except (MediaError, BeepError, UserError, RuntimeError) as exc:
-            if args.stop_on_error or len(files) == 1:
-                raise
-            counts["failed"] += 1
-            eprint(f"error: {media.name}: {exc}")
-        if len(files) > 1:
+            _batch_guard(files, args, counts, media, exc)
+        if _is_batch(args, files):
             eprint("")
-    if len(files) > 1:
-        summary = ", ".join(f"{v} {k}" for k, v in counts.items() if v)
-        print(f"{len(files)} file(s): {summary}")
+    _summary(files, counts, args)
     return 1 if counts["failed"] else 0
 
 
@@ -480,17 +582,25 @@ def build_parser() -> argparse.ArgumentParser:
     sp.add_argument("--stop-on-error", action="store_true", help="abort the batch at the first failing file")
     sp.set_defaults(func=cmd_process)
 
-    sp = sub.add_parser("scan", help="detect profanity and write <file>.censor.json for review")
+    sp = sub.add_parser("scan", help="phase one: detect profanity and write <file>.censor.json beside each file")
     add_input_arg(sp); add_scan_options(sp)
+    sp.add_argument("--overwrite", action="store_true", help="re-scan files that already have a span file")
+    sp.add_argument("--stop-on-error", action="store_true", help="abort the batch at the first failing file")
     sp.set_defaults(func=cmd_scan)
 
-    sp = sub.add_parser("render", help="remux using an existing (possibly hand-edited) <file>.censor.json")
+    sp = sub.add_parser("render", help="phase two: remux from the span files written by scan (unscanned files are skipped)")
     add_input_arg(sp); add_render_options(sp)
     sp.add_argument("--spans", metavar="JSON", help="span file to use instead of <file>.censor.json")
     sp.add_argument("--audio-track", type=int, metavar="N")
     sp.add_argument("--subtitles", metavar="FILE", help="subtitle file to censor instead of auto-detecting")
     sp.add_argument("--level", choices=TIERS, help="word level for clean subtitles (default: the scan's level)")
+    sp.add_argument("--stop-on-error", action="store_true", help="abort the batch at the first failing file")
     sp.set_defaults(func=cmd_render)
+
+    sp = sub.add_parser("status", help="show which files are unscanned, scanned or rendered")
+    add_input_arg(sp)
+    sp.add_argument("--output-dir", metavar="DIR", help="where rendered files live, if not beside the originals")
+    sp.set_defaults(func=cmd_status)
 
     sp = sub.add_parser("review", help="print the spans recorded for a file")
     add_input_arg(sp)

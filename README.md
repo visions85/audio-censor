@@ -72,14 +72,27 @@ titled "Clean". Choose the masking with `--sub-style`:
 
 `--no-clean-subs` turns it off; `[subtitles]` in the config picks sidecar, embedded or both.
 
-Review before you render:
+### Scan now, remux later
+
+`process` does everything in one go, but the two halves also run separately, which is
+how you'd treat a large library: let the slow speech-recognition pass run overnight,
+review or hand-edit what it found, then remux whenever you like, possibly on a
+different machine or with a different beep.
 
 ```bash
-audio-censor scan Movie.mkv        # writes Movie.censor.json and prints a table
-audio-censor review Movie.mkv
-$EDITOR Movie.censor.json          # add, remove or nudge spans
-audio-censor render Movie.mkv      # remux from the (edited) span file
+audio-censor scan -r /media/films      # phase one: Movie.censor.json beside each film
+audio-censor status -r /media/films    # unscanned / scanned / rendered / nothing to do
+audio-censor review Movie.mkv          # print one film's spans
+$EDITOR Movie.censor.json              # add, remove or nudge spans
+audio-censor render -r /media/films    # phase two: remux from the span files
 ```
+
+Everything the remux step needs lives beside the film: `Movie.censor.json` holds the
+spans, the chosen audio track, the word level and the language decision, and
+`Movie.transcript.json` caches the Whisper output so a re-scan with a changed word list
+takes seconds. Both commands are resumable: `scan` leaves already-scanned files alone
+(`--overwrite` to redo), `render` skips files that are not scanned yet or already have
+their clean output, and both carry on past a broken file and print a summary.
 
 Other commands: `info FILE` lists streams so you can pick `--audio-track`,
 `words` prints the active word list, `preview-beep` writes the configured beep to a
