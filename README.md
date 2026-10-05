@@ -98,6 +98,27 @@ Other commands: `info FILE` lists streams so you can pick `--audio-track`,
 `words` prints the active word list, `preview-beep` writes the configured beep to a
 `.wav` so you can audition it, and `init-config` writes a commented config template.
 
+## Live playback without remuxing (mpv)
+
+The span file is all a player needs, so a film can be censored live:
+
+```bash
+sudo apt install mpv
+audio-censor play Movie.mkv              # scans first if there is no span file yet
+audio-censor play Movie.mkv -- --fs      # anything after -- goes to mpv
+audio-censor install-mpv                 # from now on plain `mpv Movie.mkv` censors too
+```
+
+`play` launches mpv with the bundled `audio-censor.lua` script, which installs a live
+ffmpeg filter from the span file (beep, mute or duck following your `[beep]` config,
+same timing precision as the rendered track, seeking included), loads censored
+subtitles, and flashes the censored words on screen so you can audit a scan before
+rendering. Alt+c toggles censoring during playback. After `install-mpv` the script runs
+inside any mpv session and acts on every video that has a `.censor.json` beside it;
+defaults go in `~/.config/mpv/script-opts/audio-censor.conf` (`mode=mute`,
+`frequency=800`, `osd=no` ...). Custom beep sound files apply to rendered output only;
+live playback uses a sine beep.
+
 ## Whole libraries and foreign-language films
 
 ```bash

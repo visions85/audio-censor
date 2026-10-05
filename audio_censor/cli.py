@@ -4,9 +4,12 @@ from __future__ import annotations
 
 import argparse
 import os
+import shutil
+import subprocess
 import sys
 import tempfile
 import time
+from importlib import resources
 from pathlib import Path
 
 from . import __version__, asr
@@ -609,6 +612,82 @@ def cmd_preview_beep(args, cfg) -> int:
     return 0
 
 
+def mpv_script_path() -> Path:
+    return Path(str(resources.files("audio_censor").joinpath("mpv/audio-censor.lua")))
+
+
+def cmd_play(args, cfg) -> int:
+    """Play a film in mpv with live censoring from its span file (no remux needed)."""
+    media = Path(args.file).expanduser()
+    if not media.exists():
+        raise UserError(f"not found: {media}")
+    if shutil.which("mpv") is None and not args.dry_run:
+        raise UserError("mpv not found on PATH (sudo apt install mpv)")
+    side = sidecar_path(media)
+    if not side.exists():
+        eprint(f"{media.name}: no span file yet, scanning first")
+        spans, meta = scan_file(media, cfg, args)
+        save_sidecar(side, media, spans, meta)
+    spans, meta = load_sidecar(side)
+    if meta.get("skipped"):
+        eprint(f"{media.name}: {meta['skipped']}; playing uncensored")
+    elif meta.get("audio_censored") is False:
+        eprint(f"{media.name}: audio is {meta.get('audio_language') or 'unknown'}; subtitles only")
+    else:
+        eprint(f"{media.name}: {len(spans)} span(s) from {side.name}")
+    if meta.get("level") in TIERS and not args.level:
+        cfg["level"] = meta["level"]
+
+    spec = BeepSpec.from_config(cfg)
+    mode = "beep" if spec.mode == "beep" else ("duck" if spec.duck > 0 else "mute")
+    if spec.mode == "beep" and spec.wave == "file":
+        eprint("  note: live playback uses a sine beep; custom sound files apply to rendered output only")
+    opts = {"spans": str(side), "mode": mode, "duck": spec.duck, "frequency": spec.frequency,
+            "volume": spec.volume}
+    if args.no_osd:
+        opts["osd"] = "no"
+
+    with tempfile.TemporaryDirectory(prefix="audio-censor-") as tmp:
+        work = Path(tmp)
+        if cfg["subtitles"].get("clean", True) and not args.no_subs:
+            explicit = Path(args.subtitles).expanduser() if args.subtitles else None
+            info = probe(media)
+            src = find_subtitle_source(media, info, cfg["languages"], work, explicit, _ignore_tags(cfg))
+            if src is not None:
+                target = work / f"{media.stem}.{src.language or 'und'}.clean{src.path.suffix}"
+                n = write_clean_subtitles(src, Matcher.from_config(cfg), target, cfg["subtitles"].get("style", "asterisks"),
+                                          cfg["subtitles"].get("replacement", "[BLEEP]"), NameDetector.from_config(cfg))
+                opts["subs"] = str(target)
+                eprint(f"  clean subtitles: {n} word(s) masked from {src.description}")
+        cmd = ["mpv", f"--script={mpv_script_path()}"]
+        for k, v in opts.items():
+            cmd.append(f"--script-opts-append=audio-censor-{k}={v}")
+        cmd += list(args.mpv_args or [])
+        cmd.append(str(media))
+        if args.dry_run or args.verbose:
+            eprint("command:\n  " + " ".join(_quote(c) for c in cmd))
+        if args.dry_run:
+            return 0
+        return subprocess.run(cmd).returncode
+
+
+def cmd_install_mpv(args, cfg) -> int:
+    """Copy the mpv script into the user's mpv scripts directory for automatic use."""
+    base = os.environ.get("XDG_CONFIG_HOME") or os.path.join(os.path.expanduser("~"), ".config")
+    dest_dir = Path(args.dir).expanduser() if args.dir else Path(base) / "mpv" / "scripts"
+    dest_dir.mkdir(parents=True, exist_ok=True)
+    dest = dest_dir / "audio-censor.lua"
+    shutil.copyfile(mpv_script_path(), dest)
+    print(f"installed {dest}")
+    print("mpv will now censor any video that has a <video>.censor.json beside it; Alt+c toggles.")
+    print("Defaults can be set in ~/.config/mpv/script-opts/audio-censor.conf, e.g.\n  mode=beep\n  frequency=800")
+    return 0
+
+
+def _quote(s: str) -> str:
+    return s if all(c.isalnum() or c in "-_./:=,@" for c in s) else "'" + s.replace("'", "'\\''") + "'"
+
+
 # ----------------------------------------------------------------------------- parser
 
 def add_scan_options(p: argparse.ArgumentParser) -> None:
@@ -704,6 +783,25 @@ def build_parser() -> argparse.ArgumentParser:
     sp.add_argument("--level", choices=TIERS, help="word level for clean subtitles (default: the scan's level)")
     sp.add_argument("--stop-on-error", action="store_true", help="abort the batch at the first failing file")
     sp.set_defaults(func=cmd_render)
+
+    sp = sub.add_parser("play", help="play a film in mpv with live censoring from its span file (no remux)")
+    sp.add_argument("file", metavar="FILE")
+    sp.add_argument("--level", choices=TIERS, help="word level for the clean subtitles (default: the scan's)")
+    sp.add_argument("--subtitles", metavar="FILE", help="subtitle file to censor instead of auto-detecting")
+    sp.add_argument("--no-subs", action="store_true", help="do not load clean subtitles")
+    sp.add_argument("--no-osd", action="store_true", help="do not flash the censored words on screen")
+    sp.add_argument("--mode", choices=["beep", "mute"])
+    sp.add_argument("--frequency", type=float, metavar="HZ")
+    sp.add_argument("--volume", metavar="V", help="beep level 0..1")
+    sp.add_argument("--duck", type=float, metavar="LEVEL")
+    sp.add_argument("--dry-run", action="store_true", help="print the mpv command and stop")
+    sp.add_argument("--no-asr", action="store_true", help="if a scan is needed first, skip speech recognition")
+    sp.add_argument("mpv_args", nargs="*", metavar="-- MPV_ARGS", help="extra arguments passed to mpv after --")
+    sp.set_defaults(func=cmd_play)
+
+    sp = sub.add_parser("install-mpv", help="install the mpv script so mpv censors automatically")
+    sp.add_argument("--dir", metavar="DIR", help="mpv scripts directory (default ~/.config/mpv/scripts)")
+    sp.set_defaults(func=cmd_install_mpv)
 
     sp = sub.add_parser("status", help="show which files are unscanned, scanned or rendered")
     add_input_arg(sp)

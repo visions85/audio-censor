@@ -24,7 +24,7 @@ audio-censor = "audio_censor.cli:main"
 packages = ["audio_censor"]
 
 [tool.setuptools.package-data]
-audio_censor = ["data/*.toml"]
+audio_censor = ["data/*.toml", "mpv/*.lua"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
