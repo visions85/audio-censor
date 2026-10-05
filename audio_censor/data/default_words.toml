@@ -1,0 +1,43 @@
+# Default profanity list, grouped by tier.
+#
+# Pattern syntax (case-insensitive, matched against whole words):
+#   word        exact whole-word match          ("hell" does not match "hello")
+#   word*       prefix match                    ("fuck*" matches fucking, fucker, fucked)
+#   two words   phrase, each token as above     ("god damn", "son of a bitch*")
+#   re:regex    regular expression on one normalized token
+#
+# A user config can add to any tier under [words.tiers], add patterns with
+# words.extra, and exempt matches with words.allow.
+
+[tiers]
+strong = [
+  "fuck*", "motherfuck*", "mother fuck*", "fuk*", "fck*", "effing",
+  "cunt*", "cocksuck*", "cock sucker*",
+  "nigg*", "fag*", "faggot*", "retard*", "spic", "spics", "chink", "chinks", "kike", "kikes",
+  "wetback*", "tranny", "trannies", "dyke", "dykes",
+]
+moderate = [
+  "shit*", "bullshit*", "horseshit", "dipshit*",
+  "bitch*", "son of a bitch*", "sonofabitch*",
+  "asshole*", "ass hole*", "arsehole*", "asshat*", "asswipe*", "dumbass*", "jackass*", "badass*", "smartass*",
+  "bastard*",
+  "dick*", "dickhead*", "cock", "cocks", "pussy", "pussies", "twat*", "wank*", "prick", "pricks",
+  "whore*", "slut*", "skank*",
+  "goddamn*", "god damn*", "goddammit", "god dammit",
+  "piss*", "tits", "titties", "boobs",
+  "bollocks", "bugger*", "tosser", "douche*", "douchebag*",
+  "jesus christ", "jesus h christ", "christ almighty",
+]
+mild = [
+  "damn*", "dammit", "damnit",
+  "hell", "hells",
+  "ass", "asses", "arse", "arses",
+  "crap*", "crappy",
+  "bloody",
+  "jesus", "christ",
+  "sucks", "screw you", "screwed",
+  "friggin*", "frickin*", "freakin*", "freaking",
+  "jerk off", "jerkoff",
+  "turd*", "fart*",
+  "shut up",
+]

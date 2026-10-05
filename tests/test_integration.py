@@ -1,0 +1,80 @@
+"""End-to-end test against a synthetic film. Needs ffmpeg on PATH."""
+
+import re
+import shutil
+import subprocess
+
+import pytest
+
+from audio_censor.cli import main
+from audio_censor.media import probe
+
+pytestmark = pytest.mark.skipif(shutil.which("ffmpeg") is None, reason="ffmpeg not installed")
+
+SRT = """1
+00:00:01,000 --> 00:00:03,000
+Hello there, how are you today?
+
+2
+00:00:04,000 --> 00:00:06,000
+Oh, shit. That is a damn shame.
+"""
+
+
+def rms_db(path, track, start, end, channel):
+    out = subprocess.run(
+        ["ffmpeg", "-v", "info", "-i", str(path), "-map", f"0:a:{track}",
+         "-af", f"atrim={start}:{end},pan=mono|c0={channel},astats=measure_perchannel=RMS_level:measure_overall=none",
+         "-f", "null", "-"], capture_output=True, text=True).stderr
+    m = re.search(r"RMS level dB: (-?[\d.]+|-inf)", out)
+    return float(m.group(1)) if m else float("-inf")
+
+
+@pytest.fixture
+def movie(tmp_path):
+    path = tmp_path / "movie.mkv"
+    subprocess.run(
+        ["ffmpeg", "-y", "-v", "error", "-f", "lavfi", "-i", "color=c=blue:s=64x64:r=10:d=8",
+         "-f", "lavfi", "-i", "sine=frequency=220:sample_rate=48000:d=8",
+         "-filter_complex", "[1:a]pan=5.1(side)|FL=0.3*c0|FR=0.3*c0|FC=c0|SL=0.2*c0|SR=0.2*c0[a]",
+         "-map", "0:v", "-map", "[a]", "-c:v", "libx264", "-preset", "ultrafast", "-c:a", "ac3",
+         "-metadata:s:a:0", "language=eng", "-shortest", str(path)], check=True)
+    (tmp_path / "movie.en.srt").write_text(SRT)
+    return path
+
+
+def test_process_adds_beeped_clean_track(movie, tmp_path):
+    rc = main(["process", str(movie), "--no-asr", "--level", "mild", "--wave", "sine", "--frequency", "1000"])
+    assert rc == 0
+    out = movie.with_name("movie.clean.mkv")
+    assert out.exists()
+    info = probe(out)
+    audio = info.of_type("audio")
+    assert len(audio) == 2
+    assert audio[1].title == "Clean (beeped)" and audio[1].default and not audio[0].default
+    assert audio[1].channel_layout == "5.1(side)"
+
+    # untouched region matches the original
+    assert abs(rms_db(out, 1, 1.0, 3.0, "FC") - rms_db(movie, 0, 1.0, 3.0, "FC")) < 0.5
+    # inside the span: original 220 Hz tone is gone from the center, beep present, sides silent
+    assert rms_db(out, 1, 4.3, 5.5, "SL") < -60
+    assert rms_db(out, 1, 4.3, 5.5, "FC") > -15
+
+    sidecar = movie.with_name("movie.censor.json")
+    assert sidecar.exists()
+    assert "shit" in sidecar.read_text() and "damn" in sidecar.read_text()
+
+
+def test_mute_mode_and_render_from_sidecar(movie, tmp_path):
+    assert main(["scan", str(movie), "--no-asr", "--level", "mild"]) == 0
+    out = tmp_path / "muted.mkv"
+    assert main(["render", str(movie), "--mode", "mute", "-o", str(out)]) == 0
+    audio = probe(out).of_type("audio")
+    assert audio[1].title == "Clean (muted)"
+    assert rms_db(out, 1, 4.3, 5.5, "FC") < -60
+    assert rms_db(out, 1, 1.0, 3.0, "FC") > -25
+
+
+def test_nothing_found_skips_render(movie):
+    assert main(["process", str(movie), "--no-asr", "--level", "strong"]) == 0
+    assert not movie.with_name("movie.clean.mkv").exists()

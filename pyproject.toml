@@ -1,0 +1,30 @@
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "audio-censor"
+version = "0.1.0"
+description = "Scan films for profanity (subtitles + speech recognition) and remux a beeped 'Clean' audio track."
+readme = "README.md"
+requires-python = ">=3.11"
+license = { text = "MIT" }
+dependencies = [
+    "pysubs2>=1.6",
+]
+
+[project.optional-dependencies]
+asr = ["faster-whisper>=1.0"]
+dev = ["pytest>=7"]
+
+[project.scripts]
+audio-censor = "audio_censor.cli:main"
+
+[tool.setuptools]
+packages = ["audio_censor"]
+
+[tool.setuptools.package-data]
+audio_censor = ["data/*.toml"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
