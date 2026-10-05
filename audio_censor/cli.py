@@ -14,7 +14,7 @@ from .config import default_config_path, load_config, write_template
 from .media import VIDEO_EXTS, MediaError, eprint, pick_audio_stream, probe
 from .render import default_output, render, render_preview
 from .spans import Span, build_spans, format_table, load_sidecar, save_sidecar, sidecar_path
-from .subtitles import obtain_cues, scan_cues
+from .subtitles import STYLES, find_subtitle_source, load_cues, scan_cues, write_clean_subtitles
 from .wordlist import TIERS, Matcher, active_tiers, load_default_tiers
 
 
@@ -75,6 +75,14 @@ def apply_overrides(cfg: dict, args: argparse.Namespace) -> dict:
         cfg["output"]["set_default"] = False
     if g("title"):
         cfg["output"]["title"] = args.title
+    if g("no_clean_subs"):
+        cfg["subtitles"]["clean"] = False
+    if g("sub_style"):
+        cfg["subtitles"]["style"] = args.sub_style
+    if g("sub_replacement") is not None:
+        cfg["subtitles"]["replacement"] = args.sub_replacement
+    if cfg["subtitles"]["style"] not in STYLES:
+        raise UserError(f"subtitles.style must be one of {', '.join(STYLES)}")
     if cfg["level"] not in TIERS:
         raise UserError(f"level must be one of {', '.join(TIERS)}")
     return cfg
@@ -94,7 +102,9 @@ def scan_file(media: Path, cfg: dict, args: argparse.Namespace) -> tuple[list[Sp
         work = Path(tmp)
         if scan_cfg["use_subtitles"]:
             explicit = Path(args.subtitles).expanduser() if getattr(args, "subtitles", None) else None
-            cues, sub_source = obtain_cues(media, info, cfg["languages"], work, explicit)
+            src = find_subtitle_source(media, info, cfg["languages"], work, explicit)
+            cues = load_cues(src.path) if src else []
+            sub_source = src.description if src else "no subtitles found"
             if cues:
                 sub_hits = scan_cues(cues, matcher, scan_cfg.get("subtitle_mode", "estimate"))
                 eprint(f"  subtitles: {sub_source}, {len(cues)} cues, {len(sub_hits)} hits")
@@ -151,8 +161,35 @@ def render_file(media: Path, spans: list[Span], cfg: dict, args: argparse.Namesp
         return None
     if output.exists() and not getattr(args, "overwrite", False) and not getattr(args, "dry_run", False):
         raise UserError(f"{output} exists (use --overwrite)")
-    return render(media, info, dialogue, spans, spec, cfg, output,
-                  dry_run=getattr(args, "dry_run", False), verbose=getattr(args, "verbose", False))
+    dry_run = getattr(args, "dry_run", False)
+    with tempfile.TemporaryDirectory(prefix="audio-censor-") as tmp:
+        clean_subs, lang = prepare_clean_subtitles(media, info, cfg, args, output, Path(tmp), dry_run)
+        return render(media, info, dialogue, spans, spec, cfg, output, dry_run=dry_run,
+                      verbose=getattr(args, "verbose", False), clean_subs=clean_subs, clean_subs_lang=lang)
+
+
+def prepare_clean_subtitles(media: Path, info, cfg: dict, args, output: Path, work: Path,
+                            dry_run: bool) -> tuple[Path | None, str]:
+    """Write censored subtitles (sidecar and/or temp file for embedding). Returns (path, language)."""
+    sub_cfg = cfg["subtitles"]
+    if not sub_cfg.get("clean", True) or not (sub_cfg.get("sidecar", True) or sub_cfg.get("embed", True)):
+        return None, ""
+    explicit = Path(args.subtitles).expanduser() if getattr(args, "subtitles", None) else None
+    src = find_subtitle_source(media, info, cfg["languages"], work, explicit)
+    if src is None:
+        eprint("  clean subtitles: no subtitles found, skipping")
+        return None, ""
+    lang = src.language
+    name = f"{output.stem}.{lang}{src.path.suffix}" if lang else f"{output.stem}{src.path.suffix}"
+    target = output.parent / name if sub_cfg.get("sidecar", True) else work / name
+    if dry_run:
+        eprint(f"  clean subtitles: would write {target}")
+        return (target if sub_cfg.get("embed", True) else None), lang
+    count = write_clean_subtitles(src, Matcher.from_config(cfg), target,
+                                  sub_cfg.get("style", "asterisks"), sub_cfg.get("replacement", "[BLEEP]"))
+    where = target.name if sub_cfg.get("sidecar", True) else "embedded only"
+    eprint(f"  clean subtitles: {count} word(s) masked from {src.description} -> {where}")
+    return (target if sub_cfg.get("embed", True) else None), lang
 
 
 # ----------------------------------------------------------------------------- commands
@@ -174,7 +211,9 @@ def cmd_render(args, cfg) -> int:
             raise UserError(f"no span file {side.name}; run 'audio-censor scan' first")
         spans, meta = load_sidecar(side)
         track = args.audio_track if args.audio_track is not None else meta.get("audio_track")
-        eprint(f"{media.name}: {len(spans)} span(s) from {side.name}")
+        if not args.level and meta.get("level") in TIERS:
+            cfg["level"] = meta["level"]      # mask the same words in subtitles that the scan found
+        eprint(f"{media.name}: {len(spans)} span(s) from {side.name}, level {cfg['level']}")
         out = render_file(media, spans, cfg, args, track)
         if out and not args.dry_run:
             print(f"wrote {out}")
@@ -283,6 +322,10 @@ def add_render_options(p: argparse.ArgumentParser) -> None:
     g.add_argument("--beep-file", metavar="SOUND", help="custom sound file (sets --wave file)")
     g.add_argument("--beep-channel", choices=["center", "all"])
     g.add_argument("--duck", type=float, metavar="LEVEL", help="residual dialogue level under the beep (0..1)")
+    c = p.add_argument_group("clean subtitles")
+    c.add_argument("--no-clean-subs", action="store_true", help="do not write censored subtitles")
+    c.add_argument("--sub-style", choices=STYLES, help="how masked words look (default asterisks)")
+    c.add_argument("--sub-replacement", metavar="TEXT", help="replacement text for --sub-style bleep")
     o = p.add_argument_group("output")
     o.add_argument("-o", "--output", metavar="FILE", help="output file (single input only)")
     o.add_argument("--output-dir", metavar="DIR")
@@ -322,6 +365,8 @@ def build_parser() -> argparse.ArgumentParser:
     add_input_arg(sp); add_render_options(sp)
     sp.add_argument("--spans", metavar="JSON", help="span file to use instead of <file>.censor.json")
     sp.add_argument("--audio-track", type=int, metavar="N")
+    sp.add_argument("--subtitles", metavar="FILE", help="subtitle file to censor instead of auto-detecting")
+    sp.add_argument("--level", choices=TIERS, help="word level for clean subtitles (default: the scan's level)")
     sp.set_defaults(func=cmd_render)
 
     sp = sub.add_parser("review", help="print the spans recorded for a file")

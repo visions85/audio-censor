@@ -64,11 +64,21 @@ def test_process_adds_beeped_clean_track(movie, tmp_path):
     assert sidecar.exists()
     assert "shit" in sidecar.read_text() and "damn" in sidecar.read_text()
 
+    # clean subtitles: sidecar file next to the output and an embedded "Clean" track
+    clean_srt = movie.with_name("movie.clean.en.srt")
+    assert clean_srt.exists()
+    text = clean_srt.read_text()
+    assert "Oh, ****. That is a **** shame." in text and "shit" not in text
+    subs = info.of_type("subtitle")
+    assert len(subs) == 1 and subs[0].title == "Clean" and subs[0].language == "en" and not subs[0].default
+
 
 def test_mute_mode_and_render_from_sidecar(movie, tmp_path):
     assert main(["scan", str(movie), "--no-asr", "--level", "mild"]) == 0
     out = tmp_path / "muted.mkv"
-    assert main(["render", str(movie), "--mode", "mute", "-o", str(out)]) == 0
+    assert main(["render", str(movie), "--mode", "mute", "-o", str(out), "--sub-style", "bleep",
+                 "--sub-replacement", "[bleep]"]) == 0
+    assert "Oh, [bleep]. That is a [bleep] shame." in (tmp_path / "muted.en.srt").read_text()
     audio = probe(out).of_type("audio")
     assert audio[1].title == "Clean (muted)"
     assert rms_db(out, 1, 4.3, 5.5, "FC") < -60
@@ -78,3 +88,10 @@ def test_mute_mode_and_render_from_sidecar(movie, tmp_path):
 def test_nothing_found_skips_render(movie):
     assert main(["process", str(movie), "--no-asr", "--level", "strong"]) == 0
     assert not movie.with_name("movie.clean.mkv").exists()
+
+
+def test_no_clean_subs_flag(movie, tmp_path):
+    out = tmp_path / "nosubs.mkv"
+    assert main(["process", str(movie), "--no-asr", "--level", "mild", "--no-clean-subs", "-o", str(out)]) == 0
+    assert not (tmp_path / "nosubs.en.srt").exists()
+    assert probe(out).of_type("subtitle") == []

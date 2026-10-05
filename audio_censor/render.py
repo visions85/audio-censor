@@ -50,7 +50,8 @@ def default_output(media: Path, cfg: dict, output_dir: Path | None = None) -> Pa
 
 
 def build_command(media: Path, info: MediaInfo, dialogue: Stream, spans: list[Span], spec: BeepSpec,
-                  cfg: dict, output: Path, script_path: Path) -> tuple[list[str], str]:
+                  cfg: dict, output: Path, script_path: Path,
+                  clean_subs: Path | None = None, clean_subs_lang: str = "") -> tuple[list[str], str]:
     out_cfg = cfg.get("output", {})
     keep_original = bool(out_cfg.get("keep_original", True))
     set_default = bool(out_cfg.get("set_default", True))
@@ -61,6 +62,11 @@ def build_command(media: Path, info: MediaInfo, dialogue: Stream, spans: list[Sp
         file_input = 1
         spec.file_duration = probe(spec.file).duration
         inputs += ["-i", str(spec.file)]
+
+    subs_input = None
+    if clean_subs is not None:
+        subs_input = len(inputs) // 2
+        inputs += ["-i", str(clean_subs)]
 
     rate = dialogue.sample_rate or 48000
     graph = build_filtergraph(spans, spec, audio_label=f"0:a:{dialogue.type_index}",
@@ -76,7 +82,10 @@ def build_command(media: Path, info: MediaInfo, dialogue: Stream, spans: list[Sp
     cmd += ["-map", "0:v?"]
     for s in kept_audio:
         cmd += ["-map", f"0:a:{s.type_index}"]
-    cmd += ["-map", "[clean]", "-map", "0:s?", "-map", "0:t?"]
+    cmd += ["-map", "[clean]", "-map", "0:s?"]
+    if subs_input is not None:
+        cmd += ["-map", f"{subs_input}:s:0"]
+    cmd += ["-map", "0:t?"]
     # Per-stream codecs (rather than a blanket "-c copy") so ffmpeg does not warn
     # about the clean track having two codec options.
     cmd += ["-c:v", "copy", "-c:t", "copy"]
@@ -110,18 +119,33 @@ def build_command(media: Path, info: MediaInfo, dialogue: Stream, spans: list[Sp
             cmd += [f"-c:s:{s.type_index}", "mov_text"]
         else:
             cmd += [f"-c:s:{s.type_index}", "copy"]
+    if subs_input is not None:
+        sub_cfg = cfg.get("subtitles", {})
+        idx = len(info.of_type("subtitle"))
+        cmd += [f"-c:s:{idx}", "mov_text" if container in (".mp4", ".m4v", ".mov") else "copy"]
+        cmd += [f"-metadata:s:s:{idx}", "title=Clean"]
+        if clean_subs_lang:
+            cmd += [f"-metadata:s:s:{idx}", f"language={clean_subs_lang}"]
+        if sub_cfg.get("set_default", False):
+            for i in range(idx):
+                cmd += [f"-disposition:s:{i}", "0"]
+            cmd += [f"-disposition:s:{idx}", "default"]
+        else:
+            cmd += [f"-disposition:s:{idx}", "0"]
     cmd += ["-max_muxing_queue_size", "4096", str(output)]
     return cmd, graph
 
 
 def render(media: Path, info: MediaInfo, dialogue: Stream, spans: list[Span], spec: BeepSpec, cfg: dict,
-           output: Path, dry_run: bool = False, verbose: bool = False) -> Path:
+           output: Path, dry_run: bool = False, verbose: bool = False,
+           clean_subs: Path | None = None, clean_subs_lang: str = "") -> Path:
     if output.resolve() == media.resolve():
         raise MediaError("output path equals the input; refusing to overwrite the source")
     output.parent.mkdir(parents=True, exist_ok=True)
     with tempfile.TemporaryDirectory(prefix="audio-censor-") as tmp:
         script = Path(tmp) / "filter.txt"
-        cmd, graph = build_command(media, info, dialogue, spans, spec, cfg, output, script)
+        cmd, graph = build_command(media, info, dialogue, spans, spec, cfg, output, script,
+                                   clean_subs=clean_subs, clean_subs_lang=clean_subs_lang)
         if verbose or dry_run:
             eprint("filter graph:\n" + graph)
             eprint("command:\n  " + " ".join(_quote(c) for c in cmd))

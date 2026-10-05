@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import copy
 import re
 from dataclasses import dataclass
 from pathlib import Path
@@ -63,8 +64,33 @@ def pick_embedded(info: MediaInfo, languages: list[str]) -> Stream | None:
     return None
 
 
-def load_cues(path: Path) -> list[Cue]:
-    subs = pysubs2.load(str(path), encoding="utf-8", errors="replace")
+@dataclass
+class SubtitleSource:
+    path: Path            # file on disk (external file, or an extracted embedded track)
+    language: str         # "eng", "en", ... or ""
+    description: str      # for log lines
+    embedded: bool
+
+
+def _read_text(path: Path) -> str:
+    raw = path.read_bytes()
+    for enc in ("utf-8-sig", "utf-16"):
+        try:
+            text = raw.decode(enc)
+            if enc == "utf-16" and not raw.startswith((b"\xff\xfe", b"\xfe\xff")):
+                raise UnicodeDecodeError(enc, raw, 0, 1, "no BOM")
+            return text
+        except UnicodeDecodeError:
+            continue
+    return raw.decode("cp1252", errors="replace")
+
+
+def load_subs(path: Path) -> pysubs2.SSAFile:
+    """Parse a subtitle file, tolerating the usual encoding mess."""
+    return pysubs2.SSAFile.from_string(_read_text(path))
+
+
+def cues_from_subs(subs: pysubs2.SSAFile) -> list[Cue]:
     cues = []
     for ev in subs.events:
         if ev.is_comment:
@@ -77,20 +103,126 @@ def load_cues(path: Path) -> list[Cue]:
     return cues
 
 
-def obtain_cues(media: Path, info: MediaInfo, languages: list[str], workdir: Path,
-                explicit: Path | None = None) -> tuple[list[Cue], str]:
-    """Return (cues, description-of-source) or ([], reason)."""
+def load_cues(path: Path) -> list[Cue]:
+    return cues_from_subs(load_subs(path))
+
+
+def _language_tag(media: Path, sub: Path) -> str:
+    rest = sub.name[len(media.stem):-len(sub.suffix)].strip(".")
+    tags = [t for t in rest.split(".") if t and t.lower() not in ("forced", "sdh")]
+    return tags[-1] if tags else ""
+
+
+def find_subtitle_source(media: Path, info: MediaInfo, languages: list[str], workdir: Path,
+                         explicit: Path | None = None) -> SubtitleSource | None:
     if explicit is not None:
-        return load_cues(explicit), f"file {explicit.name}"
+        if not explicit.exists():
+            raise FileNotFoundError(f"subtitle file not found: {explicit}")
+        return SubtitleSource(explicit, _language_tag(media, explicit), f"file {explicit.name}", False)
     ext = find_external(media, languages)
     if ext is not None:
-        return load_cues(ext), f"file {ext.name}"
+        return SubtitleSource(ext, _language_tag(media, ext), f"file {ext.name}", False)
     stream = pick_embedded(info, languages)
     if stream is not None:
         out = workdir / f"{media.stem}.s{stream.type_index}.srt"
         extract_subtitle(media, stream.type_index, out)
-        return load_cues(out), f"embedded track {stream.describe()}"
-    return [], "no subtitles found"
+        return SubtitleSource(out, stream.language, f"embedded track {stream.describe()}", True)
+    return None
+
+
+def obtain_cues(media: Path, info: MediaInfo, languages: list[str], workdir: Path,
+                explicit: Path | None = None) -> tuple[list[Cue], str]:
+    """Return (cues, description-of-source) or ([], reason)."""
+    src = find_subtitle_source(media, info, languages, workdir, explicit)
+    if src is None:
+        return [], "no subtitles found"
+    return load_cues(src.path), src.description
+
+
+# ----------------------------------------------------------------------------- clean subtitles
+
+STYLES = ("asterisks", "first-letter", "bleep", "remove")
+_PIECE_RE = re.compile(r"(\{[^}]*\}|\\[Nnh])")   # ASS override tags and line breaks
+
+
+def _merge_ranges(ranges: list[tuple[int, int]]) -> list[tuple[int, int]]:
+    merged: list[list[int]] = []
+    for s, e in sorted(set(ranges)):
+        if merged and s <= merged[-1][1]:
+            merged[-1][1] = max(merged[-1][1], e)
+        else:
+            merged.append([s, e])
+    return [(s, e) for s, e in merged]
+
+
+def _censor_plain(text: str, matcher: Matcher, style: str, replacement: str) -> tuple[str, int]:
+    tokens = tokenize(text)
+    matches = matcher.find(tokens)
+    if not matches:
+        return text, 0
+    if style in ("bleep", "remove"):
+        ranges = [(tokens[m.start].start, tokens[m.end - 1].end) for m in matches]
+    else:
+        ranges = [(tokens[k].start, tokens[k].end) for m in matches for k in range(m.start, m.end)]
+    ranges = _merge_ranges(ranges)
+    out, pos = [], 0
+    for s, e in ranges:
+        if style == "remove":
+            # also eat one adjacent space so "a damn shame" -> "a shame"
+            if e < len(text) and text[e] == " ":
+                e += 1
+            elif s > 0 and text[s - 1] == " " and pos < s:
+                s -= 1
+            out.append(text[pos:s])
+        else:
+            out.append(text[pos:s])
+            if style == "asterisks":
+                out.append("*" * (e - s))
+            elif style == "first-letter":
+                out.append(text[s] + "*" * (e - s - 1))
+            else:
+                out.append(replacement)
+        pos = e
+    out.append(text[pos:])
+    result = "".join(out)
+    if style == "remove":
+        result = re.sub(r" {2,}", " ", result).strip()
+    return result, len(ranges)
+
+
+def censor_text(text: str, matcher: Matcher, style: str = "asterisks", replacement: str = "[BLEEP]") -> tuple[str, int]:
+    """Censor the visible words of an event's text, leaving tags and line breaks alone."""
+    if style not in STYLES:
+        raise ValueError(f"subtitle style must be one of {', '.join(STYLES)}")
+    out, count = [], 0
+    for piece in _PIECE_RE.split(text):
+        if not piece or _PIECE_RE.fullmatch(piece):
+            out.append(piece)
+            continue
+        new, n = _censor_plain(piece, matcher, style, replacement)
+        out.append(new)
+        count += n
+    return "".join(out), count
+
+
+def censor_subs(subs: pysubs2.SSAFile, matcher: Matcher, style: str, replacement: str) -> tuple[pysubs2.SSAFile, int]:
+    clean = copy.deepcopy(subs)
+    total = 0
+    for ev in clean.events:
+        if ev.is_comment:
+            continue
+        ev.text, n = censor_text(ev.text, matcher, style, replacement)
+        total += n
+    return clean, total
+
+
+def write_clean_subtitles(source: SubtitleSource, matcher: Matcher, out_path: Path,
+                          style: str, replacement: str) -> int:
+    """Write a censored copy of `source` to out_path (format follows the extension)."""
+    clean, count = censor_subs(load_subs(source.path), matcher, style, replacement)
+    out_path.parent.mkdir(parents=True, exist_ok=True)
+    clean.save(str(out_path), encoding="utf-8")
+    return count
 
 
 def _blank_non_speech(text: str) -> str:

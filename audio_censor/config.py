@@ -56,6 +56,14 @@ DEFAULTS: dict = {
         "set_default": True,           # make the clean track the default audio
         "keep_original": True,         # keep the original audio tracks in the output
     },
+    "subtitles": {
+        "clean": True,                 # also produce censored subtitles
+        "style": "asterisks",          # asterisks (s***) | first-letter (s***) | bleep ([BLEEP]) | remove
+        "replacement": "[BLEEP]",      # text used by style = bleep
+        "sidecar": True,               # write <output>.<lang>.srt next to the clean video
+        "embed": True,                 # add a "Clean" subtitle track to the output file
+        "set_default": False,          # make the clean subtitle track default
+    },
     "words": {
         "extra": [],                   # extra patterns, censored at every level
         "allow": [],                   # patterns never censored (e.g. "dick" if it's a name)
@@ -105,6 +113,14 @@ bitrate = "auto"
 title = "Clean (beeped)"
 set_default = true
 keep_original = true
+
+[subtitles]
+clean = true                # write censored subtitles alongside the clean audio
+style = "asterisks"         # asterisks | first-letter | bleep | remove
+replacement = "[BLEEP]"     # used when style = "bleep"
+sidecar = true              # Movie.clean.en.srt next to Movie.clean.mkv
+embed = true                # also add a "Clean" subtitle track inside the file
+set_default = false
 
 [words]
 extra = []                  # e.g. ["moist", "stupid*"]

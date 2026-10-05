@@ -42,6 +42,19 @@ audio-censor process Movie.mkv --beep-file ~/sounds/quack.wav
 audio-censor process Movie.mkv --mode mute --duck 0.1
 ```
 
+Clean subtitles come along for free: the words found in the subtitle text are masked
+and written to `Movie.clean.en.srt` beside the output and embedded as a subtitle track
+titled "Clean". Choose the masking with `--sub-style`:
+
+| style          | result                      |
+|----------------|-----------------------------|
+| `asterisks`    | `Oh, ****. That is a **** shame.` (default) |
+| `first-letter` | `Oh, s***. That is a d*** shame.` |
+| `bleep`        | `Oh, [BLEEP]. That is a [BLEEP] shame.` (text via `--sub-replacement`) |
+| `remove`       | `Oh, . That is a shame.`    |
+
+`--no-clean-subs` turns it off; `[subtitles]` in the config picks sidecar, embedded or both.
+
 Review before you render:
 
 ```bash
@@ -71,6 +84,12 @@ volume = 0.4                # linear 0..1, or "-8dB"
 file = "~/sounds/boing.wav" # used when wave = "file"; short files loop to fill the span
 channel = "center"          # beep only in the dialogue channel of a 5.1 mix, or "all"
 duck = 0.0                  # how much of the original dialogue survives under the beep
+
+[subtitles]
+clean = true
+style = "asterisks"         # asterisks | first-letter | bleep | remove
+sidecar = true              # Movie.clean.en.srt next to the video
+embed = true                # plus a "Clean" subtitle track inside the file
 
 [words]
 extra = ["moist"]           # censored at every level
@@ -102,6 +121,7 @@ time it takes to re-encode one audio track:
    `--codec`) and muxed as an additional audio track titled "Clean (beeped)", marked
    default so players pick it automatically. Pass `--no-default` to keep the original
    as default or `--replace-audio` to drop the originals.
+5. The censored subtitle file is muxed in as a "Clean" subtitle track in the same pass.
 
 Output defaults to `<name>.clean.mkv` beside the source. MP4 input works; text
 subtitles are converted to SRT for the MKV container.
