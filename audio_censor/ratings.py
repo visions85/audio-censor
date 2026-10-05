@@ -1,9 +1,8 @@
 """Find a film's age rating from local metadata, so G-rated titles can be skipped.
 
-Sources, in order: a rating token in the filename ("Movie (2019) [G].mkv"), a Kodi /
-Jellyfin NFO beside the file (Movie.nfo or movie.nfo, <mpaa> or <certification>), the
-show's tvshow.nfo for episodes, and container tags (iTunes-style "iTunEXTC",
-"content_rating" ...). Nothing is looked up online.
+Sources, in order: a Kodi / Jellyfin NFO beside the file (Movie.nfo or movie.nfo, <mpaa>
+or <certification>), the show's tvshow.nfo for episodes, container tags (iTunes-style
+"iTunEXTC", "content_rating" ...), and a Plex server when one is configured.
 """
 
 from __future__ import annotations
@@ -15,7 +14,6 @@ KNOWN = {"G", "PG", "PG-13", "R", "NC-17", "NR", "TV-Y", "TV-Y7", "TV-Y7-FV", "T
          "U", "12", "12A", "15", "18"}
 DEFAULT_SKIP = ["G", "TV-Y", "TV-Y7", "TV-Y7-FV", "TV-G"]
 
-_FILENAME_RE = re.compile(r"[\[(](G|PG|PG-13|R|NC-17|TV-(?:Y7-FV|Y7|Y|G|PG|14|MA))[\])]")
 _NFO_TAG_RE = re.compile(r"<(mpaa|certification|rating_mpaa)>\s*(.*?)\s*</\1>", re.I | re.S)
 _TAG_KEYS = ("itunextc", "content_rating", "contentrating", "rating", "rtng", "mpaa", "certification")
 
@@ -36,11 +34,6 @@ def normalize(raw: str) -> str:
     s = re.sub(r"^(US|USA|GB|UK|AU|CA|DE|FR|NZ)\s*[:\-]\s*", "", s)
     s = s.split("/")[0].split(",")[0].strip()
     return aliases.get(s, s)
-
-
-def from_filename(media: Path) -> str:
-    m = _FILENAME_RE.search(media.stem)
-    return m.group(1) if m else ""
 
 
 def from_nfo(path: Path) -> str:
@@ -77,9 +70,6 @@ def from_tags(tags: dict) -> str:
 
 def find_rating(media: Path, tags: dict | None = None, lookup=None) -> tuple[str, str]:
     """-> (rating or "", where it came from). `lookup(media) -> rating` is an extra source (Plex)."""
-    r = from_filename(media)
-    if r:
-        return r, "filename"
     for nfo in nfo_candidates(media):
         r = from_nfo(nfo)
         if r:

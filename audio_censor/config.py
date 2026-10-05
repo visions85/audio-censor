@@ -26,7 +26,7 @@ DEFAULTS: dict = {
         "audio_only_languages": True,  # only censor audio whose dialogue is in `languages`
         "detect_language": True,       # use Whisper language ID when the audio track is untagged
         "assume_untagged": "eng",      # language assumed for untagged tracks when detection is unavailable ("" = skip)
-        "skip_ratings": ["G", "TV-Y", "TV-Y7", "TV-Y7-FV", "TV-G"],   # ratings (from NFO / filename / tags) to skip
+        "skip_ratings": ["G", "TV-Y", "TV-Y7", "TV-Y7-FV", "TV-G"],   # ratings (from NFO / tags / Plex) to skip
         # An ASR-only hit is dropped when the subtitle line at that moment contains one of
         # these innocent sound-alikes and not the flagged word itself ("Hoover Dam").
         "homophones": {
@@ -112,7 +112,7 @@ asr_only = true
 audio_only_languages = true # skip the beeped track when the dialogue is not in `languages`
 detect_language = true      # Whisper language ID for untagged audio tracks
 assume_untagged = "eng"     # when detection is unavailable; "" treats untagged as foreign
-skip_ratings = ["G", "TV-Y", "TV-Y7", "TV-Y7-FV", "TV-G"]   # read from Movie.nfo, tvshow.nfo, "[G]" in the name, or tags
+skip_ratings = ["G", "TV-Y", "TV-Y7", "TV-Y7-FV", "TV-G"]   # read from Movie.nfo, tvshow.nfo, container tags, or Plex
 cache_transcript = true
 
 [asr]

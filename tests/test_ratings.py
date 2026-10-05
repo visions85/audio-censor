@@ -12,10 +12,8 @@ def test_normalize():
     assert normalize("") == ""
 
 
-def test_filename_token(tmp_path):
-    assert find_rating(tmp_path / "Toy Story (1995) [G].mkv") == ("G", "filename")
-    assert find_rating(tmp_path / "Toy Story (1995).mkv") == ("", "")
-    assert find_rating(tmp_path / "Grease (1978).mkv") == ("", "")        # no false token
+def test_filename_is_not_a_source(tmp_path):
+    assert find_rating(tmp_path / "Toy Story (1995) [G].mkv") == ("", "")
 
 
 def test_nfo_sources(tmp_path):
