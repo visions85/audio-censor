@@ -106,7 +106,10 @@ audio-censor process -r /media/films /media/shows
 
 Directories are walked for video files, anything that already has a `.clean.mkv` is
 skipped, errors are reported and the batch carries on (`--stop-on-error` to abort), and
-a one-line summary is printed at the end.
+a one-line summary is printed at the end. With a Plex server configured (see below),
+`--order rating` scans the best-rated titles first (critic score, else audience score),
+`--order added` the newest additions first and `--order watched` the most-played first;
+files Plex doesn't know go last.
 
 Only English dialogue is beeped. The language comes from the audio track's tag; an
 untagged track is identified by Whisper from three short clips when the `asr` extra is

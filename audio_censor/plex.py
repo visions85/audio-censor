@@ -21,6 +21,8 @@ from .media import eprint
 from .ratings import normalize
 
 CACHE_TTL = 6 * 3600
+CACHE_VERSION = 2
+ORDERS = ("name", "rating", "added", "watched")
 
 
 class PlexError(RuntimeError):
@@ -60,8 +62,8 @@ class PlexRatings:
         self.token = token
         self.path_map = {k.rstrip("/\\"): v.rstrip("/\\") for k, v in (path_map or {}).items()}
         self.use_cache = use_cache
-        self._index: dict[str, str] | None = None     # plex file path -> rating
-        self._by_tail: dict[tuple[str, ...], list[str]] = {}
+        self._index: dict[str, dict] | None = None    # plex file path -> {"content", "score", "added", "views"}
+        self._by_tail: dict[tuple[str, ...], list[dict]] = {}
 
     @classmethod
     def from_config(cls, cfg: dict, refresh: bool = False) -> "PlexRatings | None":
@@ -74,54 +76,69 @@ class PlexRatings:
 
     # ------------------------------------------------------------------ index
 
-    def _build(self) -> dict[str, str]:
+    @staticmethod
+    def _score(item: dict) -> float:
+        """Critic rating, else audience rating, else the user's own stars; -1 when Plex has none."""
+        for key in ("rating", "audienceRating", "userRating"):
+            try:
+                v = float(item.get(key))
+                if v > 0:
+                    return v
+            except (TypeError, ValueError):
+                continue
+        return -1.0
+
+    def _build(self) -> dict[str, dict]:
         cache = _cache_path()
         if self.use_cache and cache.exists() and time.time() - cache.stat().st_mtime < CACHE_TTL:
             try:
                 doc = json.loads(cache.read_text(encoding="utf-8"))
-                if doc.get("url") == self.url:
-                    return doc["ratings"]
+                if doc.get("url") == self.url and doc.get("version") == CACHE_VERSION:
+                    return doc["items"]
             except (OSError, ValueError, KeyError):
                 pass
-        eprint(f"  fetching ratings from Plex ({self.url}) ...")
+        eprint(f"  fetching library from Plex ({self.url}) ...")
         sections = _fetch_json(f"{self.url}/library/sections", self.token)
-        index: dict[str, str] = {}
+        index: dict[str, dict] = {}
         for sec in (sections.get("MediaContainer") or {}).get("Directory", []):
             kind = sec.get("type")
             if kind not in ("movie", "show"):
                 continue
             item_type = 1 if kind == "movie" else 4           # movies, or episodes
             data = _fetch_json(f"{self.url}/library/sections/{sec['key']}/all?type={item_type}", self.token)
-            show_ratings: dict[str, str] = {}
-            if kind == "show":                               # episodes inherit the show's rating
-                shows = _fetch_json(f"{self.url}/library/sections/{sec['key']}/all?type=2", self.token)
-                for sh in (shows.get("MediaContainer") or {}).get("Metadata", []):
-                    if sh.get("contentRating"):
-                        show_ratings[str(sh.get("ratingKey"))] = sh["contentRating"]
+            shows: dict[str, dict] = {}
+            if kind == "show":                               # episodes inherit the show's ratings
+                sdata = _fetch_json(f"{self.url}/library/sections/{sec['key']}/all?type=2", self.token)
+                for sh in (sdata.get("MediaContainer") or {}).get("Metadata", []):
+                    shows[str(sh.get("ratingKey"))] = sh
             for item in (data.get("MediaContainer") or {}).get("Metadata", []):
-                rating = item.get("contentRating") or show_ratings.get(str(item.get("grandparentRatingKey")), "")
-                rating = normalize(rating)
-                if not rating:
-                    continue
+                show = shows.get(str(item.get("grandparentRatingKey")), {})
+                content = normalize(item.get("contentRating") or show.get("contentRating") or "")
+                score = self._score(item)
+                if score < 0:
+                    score = self._score(show)
+                entry = {"content": content, "score": score,
+                         "added": int(item.get("addedAt") or 0), "views": int(item.get("viewCount") or 0),
+                         "title": item.get("grandparentTitle") or item.get("title") or ""}
                 for media in item.get("Media", []):
                     for part in media.get("Part", []):
                         if part.get("file"):
-                            index[part["file"]] = rating
+                            index[part["file"]] = entry
         try:
             cache.parent.mkdir(parents=True, exist_ok=True)
-            cache.write_text(json.dumps({"url": self.url, "ratings": index}), encoding="utf-8")
+            cache.write_text(json.dumps({"url": self.url, "version": CACHE_VERSION, "items": index}), encoding="utf-8")
         except OSError:
             pass
         return index
 
-    def index(self) -> dict[str, str]:
+    def index(self) -> dict[str, dict]:
         if self._index is None:
             self._index = self._build()
-            for path, rating in self._index.items():
+            for path, entry in self._index.items():
                 parts = _parts(path)
                 for n in (1, 2):
                     if len(parts) >= n:
-                        self._by_tail.setdefault(parts[-n:], []).append(rating)
+                        self._by_tail.setdefault(parts[-n:], []).append(entry)
         return self._index
 
     # ------------------------------------------------------------------ lookup
@@ -133,7 +150,7 @@ class PlexRatings:
                 return plex_prefix + s[len(local_prefix):]
         return s
 
-    def rating_for(self, media: Path) -> str:
+    def info_for(self, media: Path) -> dict | None:
         """Exact path (after path_map), else parent-dir + filename, else a unique filename."""
         index = self.index()
         mapped = self._mapped(media.resolve() if media.exists() else media)
@@ -144,6 +161,22 @@ class PlexRatings:
         parts = _parts(str(media))
         for n in (2, 1):
             hits = self._by_tail.get(parts[-n:], []) if len(parts) >= n else []
-            if len(set(hits)) == 1:
+            if hits and all(h is hits[0] or h == hits[0] for h in hits):
                 return hits[0]
-        return ""
+        return None
+
+    def rating_for(self, media: Path) -> str:
+        info = self.info_for(media)
+        return info["content"] if info else ""
+
+    def order(self, files: list[Path], by: str) -> tuple[list[Path], int]:
+        """Sort files by a Plex field, best first; unknown files last. -> (sorted, matched count)."""
+        key = {"rating": "score", "added": "added", "watched": "views"}[by]
+        decorated, matched = [], 0
+        for i, f in enumerate(files):
+            info = self.info_for(f)
+            value = info[key] if info and info.get(key) is not None else -1
+            matched += info is not None and value >= 0
+            decorated.append((-value, i, f))
+        decorated.sort()
+        return [f for _, _, f in decorated], matched

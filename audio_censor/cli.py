@@ -14,7 +14,7 @@ from .beep import BeepError, BeepSpec, WAVES
 from .config import default_config_path, load_config, write_template
 from .media import VIDEO_EXTS, MediaError, eprint, language_matches, pick_audio_stream, probe
 from .names import NameDetector
-from .plex import PlexError, PlexRatings
+from .plex import ORDERS, PlexError, PlexRatings
 from .ratings import find_rating, should_skip
 from .render import default_output, remux_with_subtitles, render, render_preview
 from .spans import Span, build_spans, format_table, load_sidecar, save_sidecar, sidecar_path, veto_by_subtitles
@@ -188,17 +188,38 @@ def scan_file(media: Path, cfg: dict, args: argparse.Namespace, position: str = 
 _PLEX: dict = {}
 
 
+def _plex(cfg: dict, args) -> PlexRatings | None:
+    if "server" not in _PLEX:
+        try:
+            _PLEX["server"] = PlexRatings.from_config(cfg, refresh=getattr(args, "refresh_plex", False))
+        except PlexError as exc:
+            eprint(f"  plex: {exc}")
+            _PLEX["server"] = None
+    return _PLEX["server"]
+
+
+def order_files(files: list[Path], cfg: dict, args) -> list[Path]:
+    """--order rating|added|watched sorts a batch with Plex's data; name is plain path order."""
+    by = getattr(args, "order", None) or "name"
+    if by == "name" or len(files) < 2:
+        return files
+    plex = _plex(cfg, args)
+    if plex is None:
+        raise UserError(f"--order {by} needs a Plex server: set [plex] url/token or PLEX_URL/PLEX_TOKEN")
+    ordered, matched = plex.order(files, by)
+    label = {"rating": "Plex rating, best first", "added": "most recently added first",
+             "watched": "most watched first"}[by]
+    eprint(f"ordering {len(files)} file(s) by {label} ({matched} matched in Plex, the rest last)\n")
+    return ordered
+
+
 def _plex_lookup(cfg: dict, args):
     """A rating_for callable backed by the configured Plex server, built once per run (or None)."""
     if "lookup" not in _PLEX:
         _PLEX["lookup"] = None
         if not cfg["scan"].get("skip_ratings"):
             return None
-        try:
-            plex = PlexRatings.from_config(cfg, refresh=getattr(args, "refresh_plex", False))
-        except PlexError as exc:
-            eprint(f"  plex: {exc}")
-            plex = None
+        plex = _plex(cfg, args)
         if plex is not None:
             def lookup(media: Path) -> str:
                 try:
@@ -362,7 +383,7 @@ def _summary(files: list[Path], counts: dict, args) -> None:
 
 def cmd_scan(args, cfg) -> int:
     """Phase one: write <file>.censor.json (and the transcript cache) beside every film."""
-    files = expand_inputs(args.files, args.recursive)
+    files = order_files(expand_inputs(args.files, args.recursive), cfg, args)
     counts = {"scanned": 0, "subtitles only": 0, "skipped (rating)": 0, "already scanned": 0, "failed": 0}
     started = time.time()
     for n, media in enumerate(files, 1):
@@ -485,7 +506,7 @@ def cmd_status(args, cfg) -> int:
 
 
 def cmd_process(args, cfg) -> int:
-    files = expand_inputs(args.files, args.recursive)
+    files = order_files(expand_inputs(args.files, args.recursive), cfg, args)
     if args.output and len(files) > 1:
         raise UserError("-o/--output works with a single input; use --output-dir for batches")
     counts = {"censored": 0, "subtitles only": 0, "clean already": 0, "skipped": 0, "skipped (rating)": 0, "failed": 0}
@@ -595,6 +616,8 @@ def add_scan_options(p: argparse.ArgumentParser) -> None:
     g.add_argument("--any-language", action="store_true", help="censor audio whatever language it is in")
     g.add_argument("--ignore-rating", action="store_true", help="scan even films rated G / TV-Y / TV-G")
     g.add_argument("--refresh-plex", action="store_true", help="re-fetch ratings from Plex instead of the 6h cache")
+    g.add_argument("--order", choices=ORDERS, help="batch order: name (default), or via Plex: rating (best first), "
+                                                   "added (newest first), watched (most viewed first)")
     g.add_argument("--audio-language", metavar="CODE", help="treat the dialogue track as this language (eng, fre ...)")
 
 

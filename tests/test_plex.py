@@ -10,13 +10,14 @@ from audio_censor.ratings import find_rating
 SECTIONS = {"MediaContainer": {"Directory": [{"key": "1", "type": "movie"}, {"key": "2", "type": "show"},
                                              {"key": "3", "type": "artist"}]}}
 MOVIES = {"MediaContainer": {"Metadata": [
-    {"title": "Up", "contentRating": "G",
+    {"title": "Up", "contentRating": "G", "rating": 9.8, "addedAt": 100, "viewCount": 5,
      "Media": [{"Part": [{"file": "/data/Movies/Up (2009)/Up (2009).mkv"}]}]},
-    {"title": "Heat", "contentRating": "R",
+    {"title": "Heat", "contentRating": "R", "audienceRating": 9.4, "addedAt": 300,
      "Media": [{"Part": [{"file": "/data/Movies/Heat (1995)/Heat (1995).mkv"}]}]},
-    {"title": "Unrated thing", "Media": [{"Part": [{"file": "/data/Movies/x/x.mkv"}]}]},
+    {"title": "Unrated thing", "rating": 4.0, "addedAt": 200, "viewCount": 9,
+     "Media": [{"Part": [{"file": "/data/Movies/x/x.mkv"}]}]},
 ]}}
-SHOWS = {"MediaContainer": {"Metadata": [{"ratingKey": "77", "title": "Bluey", "contentRating": "TV-Y"}]}}
+SHOWS = {"MediaContainer": {"Metadata": [{"ratingKey": "77", "title": "Bluey", "contentRating": "TV-Y", "rating": 9.9}]}}
 EPISODES = {"MediaContainer": {"Metadata": [
     {"title": "Magic Xylophone", "grandparentRatingKey": "77",
      "Media": [{"Part": [{"file": "D:\\TV\\Bluey\\Season 01\\Bluey S01E01.mkv"}]}]},
@@ -60,7 +61,7 @@ def test_path_map_and_cache(server, tmp_path):
     p = PlexRatings("https://plex.example.com/", "secret", {"/media/movies": "/data/Movies"})
     assert p.rating_for(Path("/media/movies/Up (2009)/Up (2009).mkv")) == "G"
     cached = json.loads((tmp_path / "cache.json").read_text())
-    assert cached["ratings"]["/data/Movies/Heat (1995)/Heat (1995).mkv"] == "R"
+    assert cached["items"]["/data/Movies/Heat (1995)/Heat (1995).mkv"]["content"] == "R"
     # a second instance uses the cache: no new fetches
     n = len(server)
     assert PlexRatings("https://plex.example.com", "secret").rating_for(Path("/data/Movies/Heat (1995)/Heat (1995).mkv")) == "R"
@@ -84,3 +85,28 @@ def test_config_and_env(monkeypatch):
     assert p is not None and p.url == "https://plex.example.com" and p.token == "secret"
     with pytest.raises(PlexError):
         PlexRatings("", "")
+
+
+def test_order_by_plex_fields(server):
+    p = PlexRatings("https://plex.example.com", "secret")
+    files = [Path("/data/Movies/x/x.mkv"), Path("/nowhere/Unknown.mkv"), Path("/data/Movies/Heat (1995)/Heat (1995).mkv"),
+             Path("/tv/Bluey S01E01.mkv"), Path("/data/Movies/Up (2009)/Up (2009).mkv")]
+    ordered, matched = p.order(files, "rating")
+    assert [f.name for f in ordered] == ["Bluey S01E01.mkv", "Up (2009).mkv", "Heat (1995).mkv", "x.mkv", "Unknown.mkv"]
+    assert matched == 4                                   # Bluey via the show's rating, Heat via audience rating
+    ordered, _ = p.order(files, "added")
+    assert [f.name for f in ordered][:3] == ["Heat (1995).mkv", "x.mkv", "Up (2009).mkv"]
+    ordered, _ = p.order(files, "watched")
+    assert [f.name for f in ordered][:2] == ["x.mkv", "Up (2009).mkv"]
+
+
+def test_order_requires_plex(tmp_path):
+    import argparse
+    from audio_censor.cli import UserError, order_files, _PLEX
+    from audio_censor.config import DEFAULTS
+    _PLEX.clear()
+    files = [tmp_path / "a.mkv", tmp_path / "b.mkv"]
+    assert order_files(files, DEFAULTS, argparse.Namespace(order="name")) == files
+    with pytest.raises(UserError):
+        order_files(files, DEFAULTS, argparse.Namespace(order="rating", refresh_plex=False))
+    _PLEX.clear()
