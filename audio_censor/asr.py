@@ -65,6 +65,33 @@ def _resolve_device(device: str, compute_type: str) -> tuple[str, str]:
     return device, compute_type
 
 
+_CUDA_LIBS = ("cublas/lib/libcublasLt.so.12", "cublas/lib/libcublas.so.12", "cudnn/lib/libcudnn.so.9")
+_cuda_preloaded = False
+
+
+def _preload_cuda_libs() -> None:
+    """Load the pip-installed CUDA libraries (nvidia-cublas-cu12, nvidia-cudnn-cu12) by path.
+
+    They live in site-packages, which is not on the loader path, so ctranslate2 cannot
+    find them by name unless they are already in the process.
+    """
+    global _cuda_preloaded
+    if _cuda_preloaded:
+        return
+    _cuda_preloaded = True
+    import ctypes
+    import importlib.util
+    spec = importlib.util.find_spec("nvidia")
+    for root in (spec.submodule_search_locations if spec else None) or []:
+        for rel in _CUDA_LIBS:
+            lib = Path(root) / rel
+            if lib.exists():
+                try:
+                    ctypes.CDLL(str(lib), mode=ctypes.RTLD_GLOBAL)
+                except OSError:
+                    pass
+
+
 _MODELS: dict = {}
 
 
@@ -97,6 +124,8 @@ def _get_model(cfg: dict):
     if key in _MODELS:
         return _MODELS[key]
     eprint(f"  loading whisper model '{model_name}' on {device} ({compute_type}) ...")
+    if device == "cuda":
+        _preload_cuda_libs()
     try:
         model = WhisperModel(model_name, device=device, compute_type=compute_type)
     except Exception as exc:  # download failure, bad model name, missing CUDA libs ...
