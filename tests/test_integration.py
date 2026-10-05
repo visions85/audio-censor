@@ -95,3 +95,46 @@ def test_no_clean_subs_flag(movie, tmp_path):
     assert main(["process", str(movie), "--no-asr", "--level", "mild", "--no-clean-subs", "-o", str(out)]) == 0
     assert not (tmp_path / "nosubs.en.srt").exists()
     assert probe(out).of_type("subtitle") == []
+
+
+@pytest.fixture
+def french_movie(movie, tmp_path):
+    path = tmp_path / "french.mkv"
+    subprocess.run(["ffmpeg", "-y", "-v", "error", "-i", str(movie), "-map", "0", "-c", "copy",
+                    "-metadata:s:a:0", "language=fre", str(path)], check=True)
+    (tmp_path / "french.en.srt").write_text(SRT)
+    return path
+
+
+def test_foreign_audio_gets_subtitles_only(french_movie, tmp_path):
+    assert main(["process", str(french_movie), "--no-asr", "--level", "mild"]) == 0
+    assert not (tmp_path / "french.clean.mkv").exists()
+    side = tmp_path / "french.en.clean.srt"
+    assert side.exists() and "Oh, ****. That is a **** shame." in side.read_text()
+    meta = (tmp_path / "french.censor.json").read_text()
+    assert '"audio_censored": false' in meta and '"audio_language": "fre"' in meta
+    # second run: the clean sidecar must not be mistaken for the source, and is skipped
+    assert main(["process", str(french_movie), "--no-asr", "--level", "mild"]) == 0
+    assert sorted(p.name for p in tmp_path.glob("french*.srt")) == ["french.en.clean.srt", "french.en.srt"]
+
+
+def test_foreign_audio_remux_mode(french_movie, tmp_path):
+    assert main(["process", str(french_movie), "--no-asr", "--level", "mild", "--standalone-subs", "remux"]) == 0
+    out = tmp_path / "french.clean.mkv"
+    info = probe(out)
+    assert [a.title for a in info.of_type("audio")] == [""]                    # original audio only, untouched
+    subs = info.of_type("subtitle")
+    assert len(subs) == 1 and subs[0].title == "Clean" and subs[0].language == "en"
+    assert (tmp_path / "french.clean.en.srt").exists()
+
+
+def test_any_language_forces_audio_censoring(french_movie, tmp_path):
+    assert main(["process", str(french_movie), "--no-asr", "--level", "mild", "--any-language"]) == 0
+    assert len(probe(tmp_path / "french.clean.mkv").of_type("audio")) == 2
+
+
+def test_batch_skips_existing_and_summarizes(movie, tmp_path, capsys):
+    assert main(["process", str(tmp_path), "--no-asr", "--level", "mild"]) == 0
+    assert main(["process", str(tmp_path), "--no-asr", "--level", "mild"]) == 0
+    err = capsys.readouterr().err
+    assert "movie.clean.mkv exists, skipping" in err

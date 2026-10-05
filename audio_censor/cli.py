@@ -11,9 +11,9 @@ from pathlib import Path
 from . import __version__, asr
 from .beep import BeepError, BeepSpec, WAVES
 from .config import default_config_path, load_config, write_template
-from .media import VIDEO_EXTS, MediaError, eprint, pick_audio_stream, probe
+from .media import VIDEO_EXTS, MediaError, eprint, language_matches, pick_audio_stream, probe
 from .names import NameDetector
-from .render import default_output, render, render_preview
+from .render import default_output, remux_with_subtitles, render, render_preview
 from .spans import Span, build_spans, format_table, load_sidecar, save_sidecar, sidecar_path
 from .subtitles import STYLES, find_subtitle_source, load_cues, scan_cues, write_clean_subtitles
 from .wordlist import TIERS, Matcher, active_tiers, load_default_tiers
@@ -80,6 +80,12 @@ def apply_overrides(cfg: dict, args: argparse.Namespace) -> dict:
         cfg["subtitles"]["clean"] = False
     if g("no_names"):
         cfg["names"]["detect"] = False
+    if g("any_language"):
+        cfg["scan"]["audio_only_languages"] = False
+    if g("standalone_subs"):
+        cfg["subtitles"]["standalone"] = args.standalone_subs
+    if cfg["subtitles"].get("standalone", "sidecar") not in ("sidecar", "remux", "skip"):
+        raise UserError("subtitles.standalone must be sidecar, remux or skip")
     if g("sub_style"):
         cfg["subtitles"]["style"] = args.sub_style
     if g("sub_replacement") is not None:
@@ -104,9 +110,21 @@ def scan_file(media: Path, cfg: dict, args: argparse.Namespace) -> tuple[list[Sp
     sub_source = "disabled"
     with tempfile.TemporaryDirectory(prefix="audio-censor-") as tmp:
         work = Path(tmp)
+        censor_audio, lang, how = decide_audio_language(media, info, dialogue, cfg, args, work)
+        base_meta = {
+            "audio_track": dialogue.type_index, "level": cfg["level"], "duration": round(info.duration, 3),
+            "audio_language": lang, "language_source": how, "audio_censored": censor_audio,
+        }
+        if not censor_audio:
+            eprint(f"  audio language: {lang or 'unknown'} ({how}); not in {', '.join(cfg['languages'])}, "
+                   "audio censoring skipped")
+            return [], {**base_meta, "subtitles": "n/a", "asr": "skipped", "names": []}
+        if how not in ("tag", "any"):
+            eprint(f"  audio language: {lang} ({how})")
+
         if scan_cfg["use_subtitles"]:
             explicit = Path(args.subtitles).expanduser() if getattr(args, "subtitles", None) else None
-            src = find_subtitle_source(media, info, cfg["languages"], work, explicit)
+            src = find_subtitle_source(media, info, cfg["languages"], work, explicit, _ignore_tags(cfg))
             cues = load_cues(src.path) if src else []
             sub_source = src.description if src else "no subtitles found"
             if cues:
@@ -146,15 +164,83 @@ def scan_file(media: Path, cfg: dict, args: argparse.Namespace) -> tuple[list[Sp
                 eprint(f"  asr: {len(asr_hits) - names} hits" + (f", {names} name use(s) exempted" if names else ""))
 
     spans = build_spans(sub_hits, asr_hits, cfg, info.duration)
-    meta = {
-        "audio_track": dialogue.type_index,
-        "level": cfg["level"],
-        "subtitles": sub_source,
-        "asr": asr_source,
-        "duration": round(info.duration, 3),
-        "names": sorted(detector.names),
-    }
+    meta = {**base_meta, "subtitles": sub_source, "asr": asr_source, "names": sorted(detector.names)}
     return spans, meta
+
+
+def decide_audio_language(media: Path, info, dialogue, cfg: dict, args, work: Path) -> tuple[bool, str, str]:
+    """Is this track in a language we censor? -> (yes/no, language code, how we know)."""
+    scan = cfg["scan"]
+    forced = getattr(args, "audio_language", None)
+    lang = (forced or dialogue.language or "").lower()
+    if lang == "und":
+        lang = ""
+    how = "forced" if forced else ("tag" if lang else "untagged")
+    if not scan.get("audio_only_languages", True):
+        return True, lang, "any"
+    if not lang:
+        if scan.get("detect_language", True) and scan.get("use_asr", True) and asr.available():
+            lang, prob = asr.detect_language(media, dialogue.type_index, info.duration, cfg, work)
+            how = f"whisper, {prob:.0%} confidence"
+        else:
+            lang = (scan.get("assume_untagged") or "").lower()
+            how = "untagged, assumed" if lang else "untagged"
+    return language_matches(lang, cfg["languages"]), lang, how
+
+
+def _ignore_tags(cfg: dict) -> tuple[str, ...]:
+    tag = (cfg["subtitles"].get("standalone_suffix") or ".clean").strip(".").lower()
+    return tuple({tag, "clean"})
+
+
+def resolve_output(media: Path, cfg: dict, args) -> Path:
+    if getattr(args, "output", None):
+        return Path(args.output).expanduser()
+    out_dir = Path(args.output_dir).expanduser() if getattr(args, "output_dir", None) else None
+    return default_output(media, cfg, out_dir)
+
+
+def render_subtitles_only(media: Path, cfg: dict, args, meta: dict) -> Path | None:
+    """Foreign-language audio: censor the English subtitles without touching the audio."""
+    sub_cfg = cfg["subtitles"]
+    mode = sub_cfg.get("standalone", "sidecar")
+    if not sub_cfg.get("clean", True) or mode == "skip":
+        eprint("  clean subtitles: disabled for non-English audio, nothing to do")
+        return None
+    info = probe(media)
+    dry_run = getattr(args, "dry_run", False)
+    with tempfile.TemporaryDirectory(prefix="audio-censor-") as tmp:
+        work = Path(tmp)
+        explicit = Path(args.subtitles).expanduser() if getattr(args, "subtitles", None) else None
+        src = find_subtitle_source(media, info, cfg["languages"], work, explicit, _ignore_tags(cfg))
+        if src is None:
+            eprint("  clean subtitles: no subtitles found, nothing to do")
+            return None
+        if src.language and not language_matches(src.language, cfg["languages"]):
+            eprint(f"  clean subtitles: only {src.language} subtitles found, nothing to do")
+            return None
+        lang = src.language
+        suffix = sub_cfg.get("standalone_suffix", ".clean")
+        if mode == "sidecar":
+            target = media.parent / (f"{media.stem}.{lang}{suffix}{src.path.suffix}" if lang
+                                     else f"{media.stem}{suffix}{src.path.suffix}")
+        else:
+            output = resolve_output(media, cfg, args)
+            name = f"{output.stem}.{lang}{src.path.suffix}" if lang else f"{output.stem}{src.path.suffix}"
+            target = output.parent / name if sub_cfg.get("sidecar", True) else work / name
+        if dry_run:
+            eprint(f"  clean subtitles: would write {target}")
+            return target
+        if mode == "sidecar" and target.exists() and not getattr(args, "overwrite", False):
+            eprint(f"  clean subtitles: {target.name} exists, skipping (--overwrite to redo)")
+            return None
+        count = write_clean_subtitles(src, Matcher.from_config(cfg), target, sub_cfg.get("style", "asterisks"),
+                                      sub_cfg.get("replacement", "[BLEEP]"), NameDetector.from_config(cfg))
+        eprint(f"  clean subtitles: {count} word(s) masked from {src.description} -> {target.name}")
+        if mode == "remux":
+            return remux_with_subtitles(media, info, target, lang, cfg, output, dry_run=dry_run,
+                                        verbose=getattr(args, "verbose", False))
+        return target
 
 
 def render_file(media: Path, spans: list[Span], cfg: dict, args: argparse.Namespace,
@@ -162,11 +248,7 @@ def render_file(media: Path, spans: list[Span], cfg: dict, args: argparse.Namesp
     info = probe(media)
     dialogue = pick_audio_stream(info, cfg["languages"], audio_track)
     spec = BeepSpec.from_config(cfg)
-    if getattr(args, "output", None):
-        output = Path(args.output).expanduser()
-    else:
-        out_dir = Path(args.output_dir).expanduser() if getattr(args, "output_dir", None) else None
-        output = default_output(media, cfg, out_dir)
+    output = resolve_output(media, cfg, args)
     if not spans and not getattr(args, "force", False):
         eprint(f"  no spans to censor in {media.name}; skipping render (use --force to remux anyway)")
         return None
@@ -186,7 +268,7 @@ def prepare_clean_subtitles(media: Path, info, cfg: dict, args, output: Path, wo
     if not sub_cfg.get("clean", True) or not (sub_cfg.get("sidecar", True) or sub_cfg.get("embed", True)):
         return None, ""
     explicit = Path(args.subtitles).expanduser() if getattr(args, "subtitles", None) else None
-    src = find_subtitle_source(media, info, cfg["languages"], work, explicit)
+    src = find_subtitle_source(media, info, cfg["languages"], work, explicit, _ignore_tags(cfg))
     if src is None:
         eprint("  clean subtitles: no subtitles found, skipping")
         return None, ""
@@ -226,29 +308,50 @@ def cmd_render(args, cfg) -> int:
         if not args.level and meta.get("level") in TIERS:
             cfg["level"] = meta["level"]      # mask the same words in subtitles that the scan found
         eprint(f"{media.name}: {len(spans)} span(s) from {side.name}, level {cfg['level']}")
-        out = render_file(media, spans, cfg, args, track)
+        if meta.get("audio_censored") is False:
+            eprint(f"  audio language {meta.get('audio_language') or 'unknown'}: subtitles only")
+            out = render_subtitles_only(media, cfg, args, meta)
+        else:
+            out = render_file(media, spans, cfg, args, track)
         if out and not args.dry_run:
             print(f"wrote {out}")
     return 0
 
 
 def cmd_process(args, cfg) -> int:
-    failures = 0
-    for media in expand_inputs(args.files, args.recursive):
+    files = expand_inputs(args.files, args.recursive)
+    if args.output and len(files) > 1:
+        raise UserError("-o/--output works with a single input; use --output-dir for batches")
+    counts = {"censored": 0, "subtitles only": 0, "clean already": 0, "skipped": 0, "failed": 0}
+    for media in files:
         try:
+            output = resolve_output(media, cfg, args)
+            if output.exists() and not args.overwrite and not args.dry_run:
+                eprint(f"{media.name}: {output.name} exists, skipping (--overwrite to redo)")
+                counts["skipped"] += 1
+                continue
             spans, meta = scan_file(media, cfg, args)
-            side = sidecar_path(media)
-            save_sidecar(side, media, spans, meta)
-            print(format_table(spans))
-            out = render_file(media, spans, cfg, args, meta["audio_track"])
+            save_sidecar(sidecar_path(media), media, spans, meta)
+            if not meta.get("audio_censored", True):
+                out = render_subtitles_only(media, cfg, args, meta)
+                counts["subtitles only"] += 1
+            else:
+                print(format_table(spans))
+                out = render_file(media, spans, cfg, args, meta["audio_track"])
+                counts["censored" if spans else "clean already"] += 1
             if out and not args.dry_run:
                 print(f"wrote {out}")
         except (MediaError, BeepError, UserError, RuntimeError) as exc:
-            if not args.keep_going:
+            if args.stop_on_error or len(files) == 1:
                 raise
-            failures += 1
+            counts["failed"] += 1
             eprint(f"error: {media.name}: {exc}")
-    return 1 if failures else 0
+        if len(files) > 1:
+            eprint("")
+    if len(files) > 1:
+        summary = ", ".join(f"{v} {k}" for k, v in counts.items() if v)
+        print(f"{len(files)} file(s): {summary}")
+    return 1 if counts["failed"] else 0
 
 
 def cmd_review(args, cfg) -> int:
@@ -324,6 +427,8 @@ def add_scan_options(p: argparse.ArgumentParser) -> None:
     g.add_argument("--device", choices=["auto", "cpu", "cuda"], help="whisper device")
     g.add_argument("--rescan", action="store_true", help="ignore a cached transcript")
     g.add_argument("--no-names", action="store_true", help="censor Dick even when it is a character's name")
+    g.add_argument("--any-language", action="store_true", help="censor audio whatever language it is in")
+    g.add_argument("--audio-language", metavar="CODE", help="treat the dialogue track as this language (eng, fre ...)")
 
 
 def add_render_options(p: argparse.ArgumentParser) -> None:
@@ -351,6 +456,9 @@ def add_render_options(p: argparse.ArgumentParser) -> None:
     o.add_argument("--overwrite", action="store_true")
     o.add_argument("--force", action="store_true", help="remux even when nothing was found")
     o.add_argument("--dry-run", action="store_true", help="print the ffmpeg command and stop")
+    o.add_argument("--standalone-subs", choices=["sidecar", "remux", "skip"],
+                   help="what to do with non-English films: censored subtitle file beside the original, "
+                        "a remuxed copy with the clean subtitle track, or nothing")
 
 
 def add_input_arg(p: argparse.ArgumentParser) -> None:
@@ -369,7 +477,7 @@ def build_parser() -> argparse.ArgumentParser:
 
     sp = sub.add_parser("process", help="scan and render in one go (the usual command)")
     add_input_arg(sp); add_scan_options(sp); add_render_options(sp)
-    sp.add_argument("--keep-going", action="store_true", help="continue with the next file after an error")
+    sp.add_argument("--stop-on-error", action="store_true", help="abort the batch at the first failing file")
     sp.set_defaults(func=cmd_process)
 
     sp = sub.add_parser("scan", help="detect profanity and write <file>.censor.json for review")

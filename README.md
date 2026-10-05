@@ -85,6 +85,26 @@ Other commands: `info FILE` lists streams so you can pick `--audio-track`,
 `words` prints the active word list, `preview-beep` writes the configured beep to a
 `.wav` so you can audition it, and `init-config` writes a commented config template.
 
+## Whole libraries and foreign-language films
+
+```bash
+audio-censor process -r /media/films /media/shows
+```
+
+Directories are walked for video files, anything that already has a `.clean.mkv` is
+skipped, errors are reported and the batch carries on (`--stop-on-error` to abort), and
+a one-line summary is printed at the end.
+
+Only English dialogue is beeped. The language comes from the audio track's tag; an
+untagged track is identified by Whisper from three short clips when the `asr` extra is
+installed, and otherwise assumed English (`scan.assume_untagged`). A film whose
+dialogue is in another language keeps its audio, but its English subtitles are still
+censored: by default to `Movie.en.clean.srt` beside the original (`--standalone-subs
+sidecar`), or `--standalone-subs remux` for a `Movie.clean.mkv` with the clean subtitle
+track muxed in, or `skip`. `--any-language` beeps everything regardless, and
+`--audio-language eng` overrides a wrong tag. Change `languages` in the config to
+censor another language, with your own word list.
+
 ## Configuration
 
 `audio-censor init-config` writes `~/.config/audio-censor/config.toml`. Every key is

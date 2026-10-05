@@ -27,15 +27,20 @@ class Cue:
     text: str
 
 
-def find_external(media: Path, languages: list[str]) -> Path | None:
+CLEAN_TAG = "clean"   # our own outputs (Movie.en.clean.srt) are never a scanning source
+
+
+def find_external(media: Path, languages: list[str], ignore_tags: tuple[str, ...] = (CLEAN_TAG,)) -> Path | None:
     """Look for <stem>.srt, <stem>.en.srt, <stem>.eng.srt ... next to the media file."""
     stem = media.stem
     candidates = []
     for p in media.parent.iterdir():
-        if p.suffix.lower() not in EXTERNAL_EXTS or not p.name.startswith(stem):
+        if p.suffix.lower() not in EXTERNAL_EXTS or not p.name.startswith(stem + ".") and p.stem != stem:
             continue
         rest = p.name[len(stem):-len(p.suffix)].strip(".").lower()
         tags = [t for t in rest.split(".") if t]
+        if any(t in ignore_tags for t in tags):
+            continue
         if any(t in ("forced", "sdh") for t in tags) and tags != ["sdh"]:
             score = 0  # forced subs only carry foreign lines; skip unless nothing else
         elif not tags:
@@ -108,21 +113,22 @@ def load_cues(path: Path) -> list[Cue]:
     return cues_from_subs(load_subs(path))
 
 
-def _language_tag(media: Path, sub: Path) -> str:
+def _language_tag(media: Path, sub: Path, ignore_tags: tuple[str, ...] = (CLEAN_TAG,)) -> str:
     rest = sub.name[len(media.stem):-len(sub.suffix)].strip(".")
-    tags = [t for t in rest.split(".") if t and t.lower() not in ("forced", "sdh")]
+    tags = [t for t in rest.split(".") if t and t.lower() not in ("forced", "sdh", *ignore_tags)]
     return tags[-1] if tags else ""
 
 
 def find_subtitle_source(media: Path, info: MediaInfo, languages: list[str], workdir: Path,
-                         explicit: Path | None = None) -> SubtitleSource | None:
+                         explicit: Path | None = None,
+                         ignore_tags: tuple[str, ...] = (CLEAN_TAG,)) -> SubtitleSource | None:
     if explicit is not None:
         if not explicit.exists():
             raise FileNotFoundError(f"subtitle file not found: {explicit}")
-        return SubtitleSource(explicit, _language_tag(media, explicit), f"file {explicit.name}", False)
-    ext = find_external(media, languages)
+        return SubtitleSource(explicit, _language_tag(media, explicit, ignore_tags), f"file {explicit.name}", False)
+    ext = find_external(media, languages, ignore_tags)
     if ext is not None:
-        return SubtitleSource(ext, _language_tag(media, ext), f"file {ext.name}", False)
+        return SubtitleSource(ext, _language_tag(media, ext, ignore_tags), f"file {ext.name}", False)
     stream = pick_embedded(info, languages)
     if stream is not None:
         out = workdir / f"{media.stem}.s{stream.type_index}.srt"

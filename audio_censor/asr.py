@@ -65,15 +65,21 @@ def _resolve_device(device: str, compute_type: str) -> tuple[str, str]:
     return device, compute_type
 
 
-def transcribe(wav: Path, cfg: dict, duration: float = 0.0, progress: bool = True) -> list[Word]:
+_MODELS: dict = {}
+
+
+def _get_model(cfg: dict):
+    """Load (once per process) the configured faster-whisper model."""
     try:
         from faster_whisper import WhisperModel
     except ImportError as exc:
         raise RuntimeError(INSTALL_HINT) from exc
-
     acfg = cfg.get("asr", {})
     device, compute_type = _resolve_device(acfg.get("device", "auto"), acfg.get("compute_type", "auto"))
     model_name = acfg.get("model", "small")
+    key = (model_name, device, compute_type)
+    if key in _MODELS:
+        return _MODELS[key]
     eprint(f"  loading whisper model '{model_name}' on {device} ({compute_type}) ...")
     try:
         model = WhisperModel(model_name, device=device, compute_type=compute_type)
@@ -83,6 +89,35 @@ def transcribe(wav: Path, cfg: dict, duration: float = 0.0, progress: bool = Tru
             f"{str(exc).splitlines()[-1] if str(exc) else exc}\n"
             "  (models download from huggingface.co on first use; pass --no-asr to scan subtitles only)"
         ) from exc
+    _MODELS[key] = model
+    return model
+
+
+def detect_language(media: Path, audio_track: int, duration: float, cfg: dict, work: Path,
+                    clip_len: float = 30.0) -> tuple[str, float]:
+    """Whisper language ID on up to three clips spread through the file -> (code, confidence)."""
+    from .media import extract_audio_clip
+    model = _get_model(cfg)
+    if duration <= clip_len * 2:
+        starts = [0.0]
+    else:
+        starts = [duration * f for f in (0.2, 0.5, 0.8)]
+    votes: dict[str, float] = {}
+    for i, start in enumerate(starts):
+        clip = work / f"langclip{i}.wav"
+        extract_audio_clip(media, audio_track, clip, start, min(clip_len, max(1.0, duration - start)))
+        _segments, info = model.transcribe(str(clip), beam_size=1, vad_filter=True, word_timestamps=False)
+        if info.language:
+            votes[info.language] = votes.get(info.language, 0.0) + float(info.language_probability or 0.0)
+    if not votes:
+        return "", 0.0
+    lang = max(votes, key=votes.get)
+    return lang, votes[lang] / len(starts)
+
+
+def transcribe(wav: Path, cfg: dict, duration: float = 0.0, progress: bool = True) -> list[Word]:
+    acfg = cfg.get("asr", {})
+    model = _get_model(cfg)
 
     language = acfg.get("language") or None
     segments, _info = model.transcribe(

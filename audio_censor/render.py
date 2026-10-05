@@ -111,29 +111,55 @@ def build_command(media: Path, info: MediaInfo, dialogue: Stream, spans: list[Sp
     else:
         cmd += [f"-disposition:a:{new_idx}", "0"]
 
-    container = output.suffix.lower()
-    for s in info.of_type("subtitle"):
-        if container in (".mkv", ".mka", ".webm") and s.codec_name in TEXT_SUBS_NEEDING_CONVERSION:
-            cmd += [f"-c:s:{s.type_index}", "srt"]
-        elif container in (".mp4", ".m4v", ".mov") and s.codec_name in ("subrip", "ass", "ssa", "webvtt"):
-            cmd += [f"-c:s:{s.type_index}", "mov_text"]
-        else:
-            cmd += [f"-c:s:{s.type_index}", "copy"]
-    if subs_input is not None:
-        sub_cfg = cfg.get("subtitles", {})
-        idx = len(info.of_type("subtitle"))
-        cmd += [f"-c:s:{idx}", "mov_text" if container in (".mp4", ".m4v", ".mov") else "copy"]
-        cmd += [f"-metadata:s:s:{idx}", "title=Clean"]
-        if clean_subs_lang:
-            cmd += [f"-metadata:s:s:{idx}", f"language={clean_subs_lang}"]
-        if sub_cfg.get("set_default", False):
-            for i in range(idx):
-                cmd += [f"-disposition:s:{i}", "0"]
-            cmd += [f"-disposition:s:{idx}", "default"]
-        else:
-            cmd += [f"-disposition:s:{idx}", "0"]
+    cmd += _subtitle_args(info, output, cfg, subs_input is not None, clean_subs_lang)
     cmd += ["-max_muxing_queue_size", "4096", str(output)]
     return cmd, graph
+
+
+def _subtitle_args(info: MediaInfo, output: Path, cfg: dict, has_clean: bool, clean_lang: str) -> list[str]:
+    """Codec / metadata options for the copied subtitle streams and the appended clean one."""
+    container = output.suffix.lower()
+    is_mp4 = container in (".mp4", ".m4v", ".mov")
+    args: list[str] = []
+    for s in info.of_type("subtitle"):
+        if container in (".mkv", ".mka", ".webm") and s.codec_name in TEXT_SUBS_NEEDING_CONVERSION:
+            args += [f"-c:s:{s.type_index}", "srt"]
+        elif is_mp4 and s.codec_name in ("subrip", "ass", "ssa", "webvtt"):
+            args += [f"-c:s:{s.type_index}", "mov_text"]
+        else:
+            args += [f"-c:s:{s.type_index}", "copy"]
+    if has_clean:
+        sub_cfg = cfg.get("subtitles", {})
+        idx = len(info.of_type("subtitle"))
+        args += [f"-c:s:{idx}", "mov_text" if is_mp4 else "copy", f"-metadata:s:s:{idx}", "title=Clean"]
+        if clean_lang:
+            args += [f"-metadata:s:s:{idx}", f"language={clean_lang}"]
+        if sub_cfg.get("set_default", False):
+            for i in range(idx):
+                args += [f"-disposition:s:{i}", "0"]
+            args += [f"-disposition:s:{idx}", "default"]
+        else:
+            args += [f"-disposition:s:{idx}", "0"]
+    return args
+
+
+def remux_with_subtitles(media: Path, info: MediaInfo, clean_subs: Path, lang: str, cfg: dict, output: Path,
+                         dry_run: bool = False, verbose: bool = False) -> Path:
+    """Copy every stream and append the clean subtitle track (used when audio is not censored)."""
+    if output.resolve() == media.resolve():
+        raise MediaError("output path equals the input; refusing to overwrite the source")
+    output.parent.mkdir(parents=True, exist_ok=True)
+    cmd = ["ffmpeg", "-y", "-hide_banner", "-loglevel", "warning", "-stats", "-i", str(media), "-i", str(clean_subs),
+           "-map", "0:v?", "-map", "0:a?", "-map", "0:s?", "-map", "1:s:0", "-map", "0:t?",
+           "-c:v", "copy", "-c:a", "copy", "-c:t", "copy"]
+    cmd += _subtitle_args(info, output, cfg, True, lang)
+    cmd += ["-max_muxing_queue_size", "4096", str(output)]
+    if verbose or dry_run:
+        eprint("command:\n  " + " ".join(_quote(c) for c in cmd))
+    if not dry_run:
+        eprint(f"  remuxing with clean subtitles -> {output.name}")
+        run(cmd, quiet=False)
+    return output
 
 
 def render(media: Path, info: MediaInfo, dialogue: Stream, spans: list[Span], spec: BeepSpec, cfg: dict,

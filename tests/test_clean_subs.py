@@ -1,7 +1,7 @@
 import pysubs2
 
 from audio_censor.config import DEFAULTS, deep_merge
-from audio_censor.subtitles import censor_subs, censor_text, load_subs, _language_tag
+from audio_censor.subtitles import censor_subs, censor_text, find_external, load_subs, _language_tag
 from audio_censor.wordlist import Matcher
 from pathlib import Path
 
@@ -58,3 +58,15 @@ def test_language_tag_from_filename():
     assert _language_tag(media, Path("/x/Movie.en.srt")) == "en"
     assert _language_tag(media, Path("/x/Movie.en.sdh.srt")) == "en"
     assert _language_tag(media, Path("/x/Movie.srt")) == ""
+
+
+def test_own_clean_outputs_are_not_a_subtitle_source(tmp_path):
+    media = tmp_path / "Movie.mkv"
+    media.touch()
+    (tmp_path / "Movie.en.clean.srt").write_text("x")
+    (tmp_path / "Movie.clean.en.srt").write_text("x")
+    (tmp_path / "Movie2.en.srt").write_text("x")              # different film
+    assert find_external(media, ["eng", "en"]) is None
+    (tmp_path / "Movie.en.srt").write_text("x")
+    assert find_external(media, ["eng", "en"]).name == "Movie.en.srt"
+    assert _language_tag(media, tmp_path / "Movie.en.clean.srt") == "en"

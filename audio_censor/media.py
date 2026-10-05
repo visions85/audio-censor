@@ -137,6 +137,15 @@ def extract_audio_wav(path: Path, audio_type_index: int, out: Path, rate: int = 
     return out
 
 
+def extract_audio_clip(path: Path, audio_type_index: int, out: Path, start: float, length: float,
+                       rate: int = 16000) -> Path:
+    """A short mono clip, for language detection."""
+    run(["ffmpeg", "-y", "-v", "error", "-ss", f"{start:.3f}", "-t", f"{length:.3f}", "-i", str(path),
+         "-map", f"0:a:{audio_type_index}", "-vn", "-sn", "-dn", "-ac", "1", "-ar", str(rate),
+         "-c:a", "pcm_s16le", str(out)])
+    return out
+
+
 def extract_subtitle(path: Path, sub_type_index: int, out: Path) -> Path:
     run(["ffmpeg", "-y", "-v", "error", "-i", str(path), "-map", f"0:s:{sub_type_index}",
          "-c:s", "srt", str(out)])

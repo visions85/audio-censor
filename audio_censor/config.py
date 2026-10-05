@@ -23,6 +23,9 @@ DEFAULTS: dict = {
         "asr_pad": 0.10,               # seconds added either side of a recognized word
         "merge_gap": 0.25,             # spans closer than this are merged
         "subtitle_drift": 2.0,         # an ASR word this far outside its cue still claims the subtitle hit
+        "audio_only_languages": True,  # only censor audio whose dialogue is in `languages`
+        "detect_language": True,       # use Whisper language ID when the audio track is untagged
+        "assume_untagged": "eng",      # language assumed for untagged tracks when detection is unavailable ("" = skip)
         "asr_only": True,              # keep ASR hits that no subtitle confirms
         "cache_transcript": True,      # save <file>.transcript.json so re-scans skip ASR
         "treat_asterisks_as_hit": True,
@@ -63,6 +66,8 @@ DEFAULTS: dict = {
         "sidecar": True,               # write <output>.<lang>.srt next to the clean video
         "embed": True,                 # add a "Clean" subtitle track to the output file
         "set_default": False,          # make the clean subtitle track default
+        "standalone": "sidecar",       # non-English audio: sidecar (<file>.<lang>.clean.srt) | remux | skip
+        "standalone_suffix": ".clean",
     },
     "names": {
         "detect": True,                # treat capitalized mid-sentence uses (Dick, Fagin) as names
@@ -91,6 +96,9 @@ asr_pad = 0.10
 merge_gap = 0.25
 subtitle_drift = 2.0
 asr_only = true
+audio_only_languages = true # skip the beeped track when the dialogue is not in `languages`
+detect_language = true      # Whisper language ID for untagged audio tracks
+assume_untagged = "eng"     # when detection is unavailable; "" treats untagged as foreign
 cache_transcript = true
 
 [asr]
@@ -126,6 +134,8 @@ replacement = "[BLEEP]"     # used when style = "bleep"
 sidecar = true              # Movie.clean.en.srt next to Movie.clean.mkv
 embed = true                # also add a "Clean" subtitle track inside the file
 set_default = false
+standalone = "sidecar"      # foreign-language audio: sidecar | remux | skip
+standalone_suffix = ".clean"
 
 [names]
 detect = true               # "Dick" mid-sentence is a character, "dick" is not
