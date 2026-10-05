@@ -23,6 +23,7 @@ class Hit:
     confidence: float = 1.0
     cue_start: float | None = None
     cue_end: float | None = None
+    name_use: bool = False   # judged to be a character's name, not a swear
 
 
 @dataclass
@@ -82,6 +83,23 @@ def build_spans(sub_hits: list[Hit], asr_hits: list[Hit], cfg: dict, duration: f
 
     confirmed_asr: set[int] = set()
     spans: list[Span] = []
+
+    # Name exemptions: a subtitle occurrence judged to be a name also exempts the ASR
+    # word for the same pattern inside that cue; ASR words judged names on their own
+    # capitalization are dropped too.
+    exempt_windows = [(sh.cue_start if sh.cue_start is not None else sh.start,
+                       sh.cue_end if sh.cue_end is not None else sh.end, sh)
+                      for sh in sub_hits if sh.name_use]
+    sub_hits = [sh for sh in sub_hits if not sh.name_use]
+    kept_asr = []
+    for ah in asr_hits:
+        if ah.name_use:
+            continue
+        if any(ah.start >= cs - slack and ah.end <= ce + slack and _same_pattern(sh, ah)
+               for cs, ce, sh in exempt_windows):
+            continue
+        kept_asr.append(ah)
+    asr_hits = kept_asr
 
     def claim(sh: Hit, cue_start: float, cue_end: float, window: float) -> int | None:
         """Index of an ASR hit for the same word within the cue window (+/- window)."""

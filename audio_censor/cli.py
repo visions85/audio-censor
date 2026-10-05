@@ -12,6 +12,7 @@ from . import __version__, asr
 from .beep import BeepError, BeepSpec, WAVES
 from .config import default_config_path, load_config, write_template
 from .media import VIDEO_EXTS, MediaError, eprint, pick_audio_stream, probe
+from .names import NameDetector
 from .render import default_output, render, render_preview
 from .spans import Span, build_spans, format_table, load_sidecar, save_sidecar, sidecar_path
 from .subtitles import STYLES, find_subtitle_source, load_cues, scan_cues, write_clean_subtitles
@@ -77,6 +78,8 @@ def apply_overrides(cfg: dict, args: argparse.Namespace) -> dict:
         cfg["output"]["title"] = args.title
     if g("no_clean_subs"):
         cfg["subtitles"]["clean"] = False
+    if g("no_names"):
+        cfg["names"]["detect"] = False
     if g("sub_style"):
         cfg["subtitles"]["style"] = args.sub_style
     if g("sub_replacement") is not None:
@@ -93,6 +96,7 @@ def scan_file(media: Path, cfg: dict, args: argparse.Namespace) -> tuple[list[Sp
     info = probe(media)
     dialogue = pick_audio_stream(info, cfg["languages"], getattr(args, "audio_track", None))
     matcher = Matcher.from_config(cfg)
+    detector = NameDetector.from_config(cfg)
     scan_cfg = cfg["scan"]
     eprint(f"{media.name}: {info.duration / 60:.1f} min, dialogue track {dialogue.describe()}")
 
@@ -106,8 +110,13 @@ def scan_file(media: Path, cfg: dict, args: argparse.Namespace) -> tuple[list[Sp
             cues = load_cues(src.path) if src else []
             sub_source = src.description if src else "no subtitles found"
             if cues:
-                sub_hits = scan_cues(cues, matcher, scan_cfg.get("subtitle_mode", "estimate"))
-                eprint(f"  subtitles: {sub_source}, {len(cues)} cues, {len(sub_hits)} hits")
+                detector.learn([c.text for c in cues], matcher)
+                sub_hits = scan_cues(cues, matcher, scan_cfg.get("subtitle_mode", "estimate"), detector)
+                names = sum(h.name_use for h in sub_hits)
+                eprint(f"  subtitles: {sub_source}, {len(cues)} cues, {len(sub_hits) - names} hits"
+                       + (f", {names} name use(s) exempted" if names else ""))
+                if detector.names:
+                    eprint(f"  names detected: {detector.summary()}")
             else:
                 eprint(f"  subtitles: {sub_source}")
 
@@ -131,9 +140,10 @@ def scan_file(media: Path, cfg: dict, args: argparse.Namespace) -> tuple[list[Sp
                     words = asr.transcribe(wav, cfg, info.duration)
                     if scan_cfg.get("cache_transcript", True):
                         asr.save_transcript(tpath, words, cfg["asr"]["model"], dialogue.type_index)
-                asr_hits = asr.scan_words(words, matcher)
+                asr_hits = asr.scan_words(words, matcher, detector)
                 asr_source = f"whisper {cfg['asr']['model']}"
-                eprint(f"  asr: {len(asr_hits)} hits")
+                names = sum(h.name_use for h in asr_hits)
+                eprint(f"  asr: {len(asr_hits) - names} hits" + (f", {names} name use(s) exempted" if names else ""))
 
     spans = build_spans(sub_hits, asr_hits, cfg, info.duration)
     meta = {
@@ -142,6 +152,7 @@ def scan_file(media: Path, cfg: dict, args: argparse.Namespace) -> tuple[list[Sp
         "subtitles": sub_source,
         "asr": asr_source,
         "duration": round(info.duration, 3),
+        "names": sorted(detector.names),
     }
     return spans, meta
 
@@ -186,7 +197,8 @@ def prepare_clean_subtitles(media: Path, info, cfg: dict, args, output: Path, wo
         eprint(f"  clean subtitles: would write {target}")
         return (target if sub_cfg.get("embed", True) else None), lang
     count = write_clean_subtitles(src, Matcher.from_config(cfg), target,
-                                  sub_cfg.get("style", "asterisks"), sub_cfg.get("replacement", "[BLEEP]"))
+                                  sub_cfg.get("style", "asterisks"), sub_cfg.get("replacement", "[BLEEP]"),
+                                  NameDetector.from_config(cfg))
     where = target.name if sub_cfg.get("sidecar", True) else "embedded only"
     eprint(f"  clean subtitles: {count} word(s) masked from {src.description} -> {where}")
     return (target if sub_cfg.get("embed", True) else None), lang
@@ -311,6 +323,7 @@ def add_scan_options(p: argparse.ArgumentParser) -> None:
     g.add_argument("--model", help="whisper model (tiny, base, small, medium, large-v3, ...)")
     g.add_argument("--device", choices=["auto", "cpu", "cuda"], help="whisper device")
     g.add_argument("--rescan", action="store_true", help="ignore a cached transcript")
+    g.add_argument("--no-names", action="store_true", help="censor Dick even when it is a character's name")
 
 
 def add_render_options(p: argparse.ArgumentParser) -> None:
@@ -326,6 +339,8 @@ def add_render_options(p: argparse.ArgumentParser) -> None:
     c.add_argument("--no-clean-subs", action="store_true", help="do not write censored subtitles")
     c.add_argument("--sub-style", choices=STYLES, help="how masked words look (default asterisks)")
     c.add_argument("--sub-replacement", metavar="TEXT", help="replacement text for --sub-style bleep")
+    if not any(a.dest == "no_names" for a in p._actions):
+        c.add_argument("--no-names", action="store_true", help="censor Dick even when it is a character's name")
     o = p.add_argument_group("output")
     o.add_argument("-o", "--output", metavar="FILE", help="output file (single input only)")
     o.add_argument("--output-dir", metavar="DIR")

@@ -64,6 +64,11 @@ DEFAULTS: dict = {
         "embed": True,                 # add a "Clean" subtitle track to the output file
         "set_default": False,          # make the clean subtitle track default
     },
+    "names": {
+        "detect": True,                # treat capitalized mid-sentence uses (Dick, Fagin) as names
+        "min_occurrences": 2,          # capitalized uses needed before ambiguous spots count as the name
+        "ignore": [],                  # words never treated as names
+    },
     "words": {
         "extra": [],                   # extra patterns, censored at every level
         "allow": [],                   # patterns never censored (e.g. "dick" if it's a name)
@@ -121,6 +126,11 @@ replacement = "[BLEEP]"     # used when style = "bleep"
 sidecar = true              # Movie.clean.en.srt next to Movie.clean.mkv
 embed = true                # also add a "Clean" subtitle track inside the file
 set_default = false
+
+[names]
+detect = true               # "Dick" mid-sentence is a character, "dick" is not
+min_occurrences = 2
+ignore = []                 # words never treated as names
 
 [words]
 extra = []                  # e.g. ["moist", "stupid*"]

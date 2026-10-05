@@ -111,19 +111,31 @@ def transcribe(wav: Path, cfg: dict, duration: float = 0.0, progress: bool = Tru
     return words
 
 
-def scan_words(words: list[Word], matcher: Matcher) -> list[Hit]:
-    """Match the wordlist against the recognized word sequence."""
-    tokens: list[Token] = []
-    owners: list[int] = []        # token -> index into words
+def scan_words(words: list[Word], matcher: Matcher, detector=None) -> list[Hit]:
+    """Match the wordlist against the recognized word sequence.
+
+    Whisper capitalizes proper nouns, so the transcript text is rebuilt and the same
+    name classifier used for subtitles decides whether "Dick" is a character.
+    """
+    text = ""
+    spans_: list[tuple[int, int, int]] = []     # (char start, char end, word index)
     for i, w in enumerate(words):
-        for t in tokenize(w.text):
-            tokens.append(t)
-            owners.append(i)
+        piece = w.text if w.text.startswith((" ", "\n")) or not text else " " + w.text
+        spans_.append((len(text), len(text) + len(piece), i))
+        text += piece
+    tokens: list[Token] = tokenize(text)
+    owners: list[int] = []        # token -> index into words
+    j = 0
+    for t in tokens:
+        while j < len(spans_) - 1 and t.start >= spans_[j][1]:
+            j += 1
+        owners.append(spans_[j][2])
     hits = []
     for m in matcher.find(tokens):
         first = words[owners[m.start]]
         last = words[owners[m.end - 1]]
         prob = min(words[owners[k]].probability for k in range(m.start, m.end))
+        name_use = detector.is_name_use(text, tokens, m) if detector else False
         hits.append(Hit(start=first.start, end=last.end, word=m.text, pattern=m.pattern.raw,
-                        tier=m.pattern.tier, source="asr", confidence=prob))
+                        tier=m.pattern.tier, source="asr", confidence=prob, name_use=name_use))
     return hits

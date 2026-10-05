@@ -10,6 +10,7 @@ from pathlib import Path
 import pysubs2
 
 from .media import MediaInfo, Stream, extract_subtitle, language_matches
+from .names import NameDetector
 from .spans import Hit
 from .wordlist import Matcher, tokenize
 
@@ -155,9 +156,12 @@ def _merge_ranges(ranges: list[tuple[int, int]]) -> list[tuple[int, int]]:
     return [(s, e) for s, e in merged]
 
 
-def _censor_plain(text: str, matcher: Matcher, style: str, replacement: str) -> tuple[str, int]:
+def _censor_plain(text: str, matcher: Matcher, style: str, replacement: str,
+                  detector: "NameDetector | None" = None) -> tuple[str, int]:
     tokens = tokenize(text)
     matches = matcher.find(tokens)
+    if detector:
+        matches = [m for m in matches if not detector.is_name_use(text, tokens, m)]
     if not matches:
         return text, 0
     if style in ("bleep", "remove"):
@@ -190,7 +194,8 @@ def _censor_plain(text: str, matcher: Matcher, style: str, replacement: str) -> 
     return result, len(ranges)
 
 
-def censor_text(text: str, matcher: Matcher, style: str = "asterisks", replacement: str = "[BLEEP]") -> tuple[str, int]:
+def censor_text(text: str, matcher: Matcher, style: str = "asterisks", replacement: str = "[BLEEP]",
+                detector: "NameDetector | None" = None) -> tuple[str, int]:
     """Censor the visible words of an event's text, leaving tags and line breaks alone."""
     if style not in STYLES:
         raise ValueError(f"subtitle style must be one of {', '.join(STYLES)}")
@@ -199,27 +204,31 @@ def censor_text(text: str, matcher: Matcher, style: str = "asterisks", replaceme
         if not piece or _PIECE_RE.fullmatch(piece):
             out.append(piece)
             continue
-        new, n = _censor_plain(piece, matcher, style, replacement)
+        new, n = _censor_plain(piece, matcher, style, replacement, detector)
         out.append(new)
         count += n
     return "".join(out), count
 
 
-def censor_subs(subs: pysubs2.SSAFile, matcher: Matcher, style: str, replacement: str) -> tuple[pysubs2.SSAFile, int]:
+def censor_subs(subs: pysubs2.SSAFile, matcher: Matcher, style: str, replacement: str,
+                detector: "NameDetector | None" = None) -> tuple[pysubs2.SSAFile, int]:
     clean = copy.deepcopy(subs)
     total = 0
     for ev in clean.events:
         if ev.is_comment:
             continue
-        ev.text, n = censor_text(ev.text, matcher, style, replacement)
+        ev.text, n = censor_text(ev.text, matcher, style, replacement, detector)
         total += n
     return clean, total
 
 
 def write_clean_subtitles(source: SubtitleSource, matcher: Matcher, out_path: Path,
-                          style: str, replacement: str) -> int:
+                          style: str, replacement: str, detector: "NameDetector | None" = None) -> int:
     """Write a censored copy of `source` to out_path (format follows the extension)."""
-    clean, count = censor_subs(load_subs(source.path), matcher, style, replacement)
+    subs = load_subs(source.path)
+    if detector is not None:
+        detector.learn([c.text for c in cues_from_subs(subs)], matcher)
+    clean, count = censor_subs(subs, matcher, style, replacement, detector)
     out_path.parent.mkdir(parents=True, exist_ok=True)
     clean.save(str(out_path), encoding="utf-8")
     return count
@@ -233,7 +242,10 @@ def _blank_non_speech(text: str) -> str:
     return _SPEAKER_RE.sub(blank, text)
 
 
-def scan_cues(cues: list[Cue], matcher: Matcher, mode: str = "estimate") -> list[Hit]:
+def scan_cues(cues: list[Cue], matcher: Matcher, mode: str = "estimate",
+              detector: "NameDetector | None" = None) -> list[Hit]:
+    """Find flagged words in cues. Hits judged to be names are returned with name_use=True
+    (build_spans drops them and uses them to exempt the matching ASR words)."""
     hits: list[Hit] = []
     for cue in cues:
         text = _blank_non_speech(cue.text)
@@ -243,6 +255,7 @@ def scan_cues(cues: list[Cue], matcher: Matcher, mode: str = "estimate") -> list
         length = max(1, len(text))
         dur = max(0.0, cue.end - cue.start)
         for m in matcher.find(tokens):
+            name_use = detector.is_name_use(text, tokens, m) if detector else False
             if mode == "cue":
                 start, end = cue.start, cue.end
             else:
@@ -252,5 +265,5 @@ def scan_cues(cues: list[Cue], matcher: Matcher, mode: str = "estimate") -> list
                 end = cue.start + dur * (c1 / length)
             hits.append(Hit(start=start, end=end, word=m.text, pattern=m.pattern.raw,
                             tier=m.pattern.tier, source="subtitle", confidence=0.6,
-                            cue_start=cue.start, cue_end=cue.end))
+                            cue_start=cue.start, cue_end=cue.end, name_use=name_use))
     return hits

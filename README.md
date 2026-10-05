@@ -108,9 +108,12 @@ style = "asterisks"         # asterisks | first-letter | bleep | remove
 sidecar = true              # Movie.clean.en.srt next to the video
 embed = true                # plus a "Clean" subtitle track inside the file
 
+[names]
+detect = true               # Dick the character vs. dick the insult (see below)
+
 [words]
 extra = ["moist"]           # censored at every level
-allow = ["dick"]            # never censored (Dick is a character's name)
+allow = ["dick"]            # never censored anywhere, whatever the context
 [words.tiers]
 mild = ["heck*"]            # add patterns to a tier
 ```
@@ -123,6 +126,33 @@ in `audio_censor/data/default_words.toml`, grouped into **strong** (f-word, slur
 
 Whisper occasionally writes `f***ing` instead of the word; such tokens are always
 treated as hits.
+
+### Names versus swears
+
+A film can have a character called Dick, or a Fagin who trips the `fag*` prefix. The
+scanner learns per film which flagged words are names: a word written with a capital
+in the middle of a sentence at least twice (`names.min_occurrences`), or used as an
+SDH speaker label (`DICK:`), is a name for that film. Each occurrence is then judged on
+its own:
+
+| line                              | verdict                                   |
+|-----------------------------------|-------------------------------------------|
+| `Hey Dick, pass the ball.`        | name, left alone                          |
+| `Don't be such a dick about it.`  | swear, beeped                             |
+| `You're a Dick, you know that?`   | swear: "a Dick" has a determiner in front |
+| `Dick! Over here!`                | sentence-initial, so the film-level verdict decides |
+
+The same classifier runs on Whisper's transcript, which capitalizes proper nouns too,
+and an ASR word inside a subtitle line judged to be a name is exempted with it. Clean
+subtitles keep the name and mask the insult. The scan log reports what it decided:
+
+```
+names detected: Dick (3 capitalized, 1 speaker label(s))
+```
+
+`--no-names` or `names.detect = false` turns this off; `names.ignore = ["dick"]`
+excludes one word; `words.allow` remains the blunt instrument that always exempts a
+word regardless of context.
 
 ## How the clean track is built
 
