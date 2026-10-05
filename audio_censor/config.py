@@ -26,6 +26,13 @@ DEFAULTS: dict = {
         "audio_only_languages": True,  # only censor audio whose dialogue is in `languages`
         "detect_language": True,       # use Whisper language ID when the audio track is untagged
         "assume_untagged": "eng",      # language assumed for untagged tracks when detection is unavailable ("" = skip)
+        # An ASR-only hit is dropped when the subtitle line at that moment contains one of
+        # these innocent sound-alikes and not the flagged word itself ("Hoover Dam").
+        "homophones": {
+            "damn": ["dam", "dams"], "hell": ["he'll"], "bitch": ["beach", "beaches"],
+            "shit": ["sheet", "sheets", "shoot"], "cock": ["caulk", "caulking"], "ass": ["as"],
+            "dick": ["dic", "dyk"], "tits": ["tit's"], "whore": ["hoar", "hoare"],
+        },
         "asr_only": True,              # keep ASR hits that no subtitle confirms
         "cache_transcript": True,      # save <file>.transcript.json so re-scans skip ASR
         "treat_asterisks_as_hit": True,

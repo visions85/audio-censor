@@ -62,3 +62,19 @@ def test_regex_pattern():
     p = compile_pattern("re:sh[i1]+t", "moderate")
     m = Matcher([p])
     assert hits(m, "shiiit sh1t shot") == ["shiiit", "sh1t"]
+
+
+INNOCENT = """Dickens Dickinson Dickerson farther farthest farthing arsenal arsenic Arsenio niggling
+Fukushima retardant retardation turducken assassin class glass pass passing bass hello shell
+shellfish cockpit cockatoo cocktail peacock hitchcock shiitake crappie Scunthorpe Titsworth
+pissarro bugle buggy dam dams dame damask hellenic helmet""".split()
+
+
+def test_innocent_words_are_not_flagged():
+    m = matcher("mild")
+    assert [w for w in INNOCENT if hits(m, w)] == []
+
+
+def test_possessive_of_exact_word_matches():
+    m = matcher("moderate")
+    assert hits(m, "That dick's car. Dickens' novel.") == ["dick's"]

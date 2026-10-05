@@ -81,7 +81,7 @@ def compile_pattern(raw: str, tier: str) -> Pattern:
 def _part_matches(part, token: str) -> bool:
     kind, value = part
     if kind == "exact":
-        return token == value
+        return token == value or (token.endswith("'s") and token[:-2] == value)
     if kind == "prefix":
         return token.startswith(value)
     return value.fullmatch(token) is not None

@@ -15,7 +15,7 @@ from .config import default_config_path, load_config, write_template
 from .media import VIDEO_EXTS, MediaError, eprint, language_matches, pick_audio_stream, probe
 from .names import NameDetector
 from .render import default_output, remux_with_subtitles, render, render_preview
-from .spans import Span, build_spans, format_table, load_sidecar, save_sidecar, sidecar_path
+from .spans import Span, build_spans, format_table, load_sidecar, save_sidecar, sidecar_path, veto_by_subtitles
 from .subtitles import STYLES, find_subtitle_source, load_cues, scan_cues, write_clean_subtitles
 from .wordlist import TIERS, Matcher, active_tiers, load_default_tiers
 
@@ -107,7 +107,7 @@ def scan_file(media: Path, cfg: dict, args: argparse.Namespace, position: str = 
     scan_cfg = cfg["scan"]
     eprint(f"{position}{media.name}: {info.duration / 60:.1f} min, dialogue track {dialogue.describe()}")
 
-    sub_hits, asr_hits = [], []
+    sub_hits, asr_hits, cues = [], [], []
     sub_source = "disabled"
     with tempfile.TemporaryDirectory(prefix="audio-censor-") as tmp:
         work = Path(tmp)
@@ -160,9 +160,13 @@ def scan_file(media: Path, cfg: dict, args: argparse.Namespace, position: str = 
                     if scan_cfg.get("cache_transcript", True):
                         asr.save_transcript(tpath, words, cfg["asr"]["model"], dialogue.type_index)
                 asr_hits = asr.scan_words(words, matcher, detector)
-                asr_source = f"whisper {cfg['asr']['model']}"
                 names = sum(h.name_use for h in asr_hits)
-                eprint(f"  asr: {len(asr_hits) - names} hits" + (f", {names} name use(s) exempted" if names else ""))
+                asr_hits = veto_by_subtitles(asr_hits, cues, scan_cfg.get("homophones", {}))
+                vetoed = sum(h.name_use for h in asr_hits) - names
+                asr_source = f"whisper {cfg['asr']['model']}"
+                eprint(f"  asr: {len(asr_hits) - names - vetoed} hits"
+                       + (f", {names} name use(s) exempted" if names else "")
+                       + (f", {vetoed} contradicted by subtitles (sound-alikes)" if vetoed else ""))
 
     spans = build_spans(sub_hits, asr_hits, cfg, info.duration)
     meta = {**base_meta, "subtitles": sub_source, "asr": asr_source, "names": sorted(detector.names)}

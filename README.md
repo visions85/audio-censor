@@ -160,6 +160,11 @@ in `audio_censor/data/default_words.toml`, grouped into **strong** (f-word, slur
 Whisper occasionally writes `f***ing` instead of the word; such tokens are always
 treated as hits.
 
+Patterns are deliberately narrow: `dick` and `dicks` rather than `dick*`, so Dickens,
+Dickinson and farthing are left alone. If Whisper hears "damn" where the subtitles say
+"Hoover Dam", the subtitle wins: `scan.homophones` lists the innocent sound-alikes that
+veto an ASR-only hit when they appear in the subtitle line at that moment.
+
 ### Names versus swears
 
 A film can have a character called Dick, or a Fagin who trips the `fag*` prefix. The

@@ -203,3 +203,28 @@ def format_table(spans: list[Span]) -> str:
         lines.append(f"{i:>3}  {fmt_time(s.start):>12}  {fmt_time(s.end):>12}  {s.duration:5.2f}  "
                      f"{s.tier:8}  {src:8}  {', '.join(s.words)}")
     return "\n".join(lines)
+
+
+def veto_by_subtitles(asr_hits: list[Hit], cues, homophones: dict[str, list[str]], slack: float = 0.6) -> list[Hit]:
+    """Drop ASR hits that the subtitles contradict with a sound-alike.
+
+    If the subtitle line playing when Whisper heard "damn" says "dam" and does not contain
+    the flagged word, trust the subtitle. Hits with no overlapping cue are kept.
+    """
+    from .wordlist import tokenize
+    if not cues or not homophones:
+        return asr_hits
+    table = {k.lower(): {w.lower() for w in v} for k, v in homophones.items()}
+    kept = []
+    for hit in asr_hits:
+        base = hit.word.split()[-1].removesuffix("'s")
+        innocents = table.get(base)
+        if not innocents:
+            kept.append(hit)
+            continue
+        overlapping = [c for c in cues if c.start - slack <= hit.end and c.end + slack >= hit.start]
+        words = {t.text for c in overlapping for t in tokenize(c.text)}
+        if words and words & innocents and not any(w == base or w.startswith(base) for w in words):
+            hit.name_use = True   # reuse the exemption path: build_spans drops it
+        kept.append(hit)
+    return kept

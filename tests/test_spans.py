@@ -99,3 +99,16 @@ def test_each_asr_word_claimed_once():
     # one confirmed by ASR, the second subtitle "shit" kept as an estimate (merged if close)
     assert any(s.estimated for s in spans) or len(spans) == 1
     assert sum("subtitle" in s.sources for s in spans) >= 1
+
+
+def test_subtitles_veto_asr_homophone():
+    from audio_censor.spans import veto_by_subtitles
+    from audio_censor.subtitles import Cue
+    table = DEFAULTS["scan"]["homophones"]
+    cues = [Cue(10.0, 12.0, "We're driving out to the Hoover Dam."), Cue(20.0, 22.0, "Well, damn.")]
+    asr = [Hit(11.0, 11.3, "damn", "damn*", "mild", "asr", 0.8),      # Whisper misheard "dam"
+           Hit(21.0, 21.3, "damn", "damn*", "mild", "asr", 0.9),      # real
+           Hit(40.0, 40.3, "damn", "damn*", "mild", "asr", 0.9)]      # no subtitle there: kept
+    out = veto_by_subtitles(asr, cues, table)
+    assert [h.name_use for h in out] == [True, False, False]
+    assert len(build_spans([], out, CFG)) == 2
