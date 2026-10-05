@@ -42,3 +42,13 @@ def test_overrides():
     assert decide("fre", any_language=True)[0] is False      # flag is applied in apply_overrides, not here
     assert decide("fre", {"scan": {"audio_only_languages": False}}) == (True, "fre", "any")
     assert decide("jpn", {"languages": ["jpn"]}) == (True, "jpn", "tag")
+
+
+def test_verbose_and_config_accepted_after_subcommand():
+    from audio_censor.cli import build_parser
+    a = build_parser().parse_args(["scan", "x.mkv", "-v"])
+    b = build_parser().parse_args(["-v", "scan", "x.mkv"])
+    c = build_parser().parse_args(["scan", "x.mkv"])
+    assert a.verbose is True and b.verbose is True and c.verbose is False
+    assert build_parser().parse_args(["render", "x.mkv", "-c", "my.toml"]).config == "my.toml"
+    assert build_parser().parse_args(["render", "x.mkv"]).config is None

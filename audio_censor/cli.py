@@ -674,6 +674,17 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("-v", "--verbose", action="store_true")
     sub = p.add_subparsers(dest="command", required=True)
 
+    _add_parser = sub.add_parser
+
+    def add_parser(name, **kw):
+        """Every subcommand also accepts -v/-c after its name, not only before it."""
+        sp = _add_parser(name, **kw)
+        sp.add_argument("-v", "--verbose", action="store_true", default=argparse.SUPPRESS)
+        sp.add_argument("-c", "--config", metavar="FILE", default=argparse.SUPPRESS, help=argparse.SUPPRESS)
+        return sp
+
+    sub.add_parser = add_parser
+
     sp = sub.add_parser("process", help="scan and render in one go (the usual command)")
     add_input_arg(sp); add_scan_options(sp); add_render_options(sp)
     sp.add_argument("--stop-on-error", action="store_true", help="abort the batch at the first failing file")
