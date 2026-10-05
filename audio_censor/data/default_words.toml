@@ -7,7 +7,38 @@
 #   re:regex    regular expression on one normalized token
 #
 # A user config can add to any tier under [words.tiers], add patterns with
-# words.extra, and exempt matches with words.allow.
+# words.extra, and exempt matches with words.allow (a longer phrase there, such as
+# "dick van dyke", exempts the listed word inside it).
+
+# Phrases that are never censored, even though a word inside them is on the list.
+allow = [
+  "cum laude",
+  # "sex" meaning male or female
+  "opposite sex", "same sex", "fairer sex", "weaker sex", "stronger sex", "gentler sex", "second sex", "third sex",
+  "either sex", "the male sex", "the female sex", "single sex", "mixed sex",
+  "what sex", "which sex", "sex is it", "sex is male", "sex is female", "sex male", "sex female",
+  "sex of the", "sex of a", "sex of an", "sex of my", "sex of your", "sex of our", "sex of their", "sex of his",
+  "sex of her", "sex of this", "sex of that", "baby's sex", "child's sex", "fetus's sex", "puppy's sex",
+  "kitten's sex", "determine the sex", "determines the sex", "know the sex", "tell the sex", "reveal the sex",
+  "biological sex", "birth sex", "legal sex", "assigned sex", "sex assigned", "sex at birth", "sex change*",
+  "by sex", "age and sex", "age or sex", "sex and age", "sex or age", "race and sex", "race or sex",
+  "sex and race", "sex or race", "regardless of sex", "basis of sex", "irrespective of sex",
+  "sex discrimination", "sex chromosome*", "sex ratio*", "sex linked", "sex differences", "sex difference",
+  # "horny" meaning horned or made of horn (animals, nature documentaries)
+  "horny toad*", "horny frog*", "horny lizard*", "horny sponge*", "horny coral*", "horny beetle*",
+  "horny beak*", "horny bill*", "horny shell*", "horny carapace*", "horny scale*", "horny plate*",
+  "horny sheath*", "horny spine*", "horny spike*", "horny hoof", "horny hooves", "horny claw*", "horny skin",
+  "horny hide*", "horny layer*", "horny growth*", "horny covering*", "horny pad*", "horny handed", "horny hands",
+  "sperm whale*", "sperm oil", "sperm candle*",
+  # "boob" meaning the television, a fool or a blunder, and the seabird
+  "boob tube*", "you boob", "you boobs", "you big boob", "you silly boob", "you stupid boob", "you old boob",
+  "silly boob", "stupid boob", "dumb boob", "poor boob", "clumsy boob", "complete boob", "total boob",
+  "what a boob", "such a boob", "like a boob", "bit of a boob", "made a boob", "make a boob", "bunch of boobs",
+  "footed boobies", "footed boobie", "masked boobies", "nazca boobies", "peruvian boobies",
+  # the birds; "great tits" is left out on purpose, it is rarely about ornithology
+  "blue tits", "coal tits", "marsh tits", "willow tits", "crested tits", "bearded tits", "tailed tits",
+  "penduline tits", "sombre tits", "azure tits", "varied tits", "bush tits", "tufted tits",
+]
 
 [tiers]
 strong = [
@@ -16,6 +47,8 @@ strong = [
   "nigga", "niggas", "niggah", "niggahs", "nigger", "niggers", "fag", "fags", "faggot*", "faggy",
   "retard", "retards", "retarded", "spic", "spics", "chink", "chinks", "kike", "kikes",
   "wetback*", "tranny", "trannies", "dyke", "dykes",
+  # compounds the fuck* prefix does not reach
+  "buttfuck*", "assfuck*", "titfuck*", "fingerfuck*", "facefuck*", "skullfuck*", "clusterfuck*", "mindfuck*",
 ]
 moderate = [
   "shit*", "bullshit*", "horseshit", "dipshit*",
@@ -29,6 +62,25 @@ moderate = [
   "piss", "pissed", "pisser", "pissers", "pissing", "pisses", "piss off", "tits", "titties", "boobs",
   "bollocks", "bugger*", "tosser", "douche*", "douchebag*",
   "jesus christ", "jesus h christ", "christ almighty",
+  # sex acts
+  "blowjob*", "blow job*", "handjob*", "hand job*", "rimjob*", "rim job*", "footjob*", "titjob*",
+  "deepthroat*", "deep throat*", "fellatio", "cunnilingus", "sodomy", "sodomiz*", "sodomis*",
+  "masturbat*", "jack off", "jacks off", "jacked off", "jacking off", "jerks off", "jerked off", "jerking off",
+  "whack off", "whacking off", "rub one out", "bust a nut", "fingerbang*", "fisting", "pegging",
+  "eat me out", "eat her out", "eat you out",
+  "get laid", "gets laid", "got laid", "getting laid", "shagging", "shagged", "humping", "humped", "boink*",
+  "threesome*", "gangbang*", "gang bang*", "orgy", "orgies", "doggystyle", "doggy style", "booty call*",
+  "orgasm*", "ejaculat*", "cum", "cums", "cumming", "cumshot*", "jizz*", "creampie*", "bukkake", "queef*",
+  # anatomy and arousal, crude
+  "clit*", "schlong*", "pecker*", "ballsack*", "ball sack*", "nutsack*", "nut sack*", "bellend*", "knobhead*",
+  "vag", "vajayjay", "cooch", "coochie*", "cooter*", "poontang", "punani", "minge", "cameltoe*", "camel toe*",
+  "boob", "boobie", "boobies", "titty", "tittie",
+  "horny", "horndog*", "boner*", "stiffy", "erection*", "blue balls", "wet dream*",
+  # the trade, toys, kinks
+  "porn*", "hooker*", "prostitut*", "gigolo*", "brothel*", "nympho*", "thot", "thots", "milf*", "dilf*",
+  "perv", "pervs", "pervy", "pervert*", "cuck", "cucks", "cuckold*",
+  "dildo*", "buttplug*", "butt plug*", "vibrator*", "bdsm", "bondage", "dominatrix*", "kinky", "fetish*",
+  "lapdance*", "lap dance*",
 ]
 mild = [
   "damn*", "dammit", "damnit",
@@ -42,4 +94,10 @@ mild = [
   "jerk off", "jerkoff",
   "turd", "turds", "fart", "farts", "farted", "farting", "farty",
   "shut up",
+  # sex, plain or clinical
+  "sex", "sexy", "sexier", "sexiest", "sexual*", "sexed", "sext", "sexts", "sexted", "sexting",
+  "intercourse", "foreplay", "make love", "makes love", "made love", "making love",
+  "penis*", "vagina*", "vulva", "labia", "scrotum", "testicle*", "genital*", "pubes", "pubic", "nipple*",
+  "semen", "sperm", "condom*", "lube", "virgin", "virgins", "virginity",
+  "stripper*", "strip club*", "striptease*",
 ]
