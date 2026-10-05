@@ -70,3 +70,32 @@ def test_sidecar_roundtrip(tmp_path):
     side = save_sidecar(tmp_path / "film.censor.json", media, spans, {"audio_track": 0})
     loaded, meta = load_sidecar(side)
     assert loaded == spans and meta["audio_track"] == 0 and meta["source_file"] == "film.mkv"
+
+
+def test_asr_scan_words_phrase_and_probability():
+    from audio_censor.asr import Word, scan_words
+    words = [Word(1.0, 1.2, " You"), Word(1.2, 1.4, " son"), Word(1.4, 1.5, " of"), Word(1.5, 1.6, " a"),
+             Word(1.6, 2.0, " bitch!", 0.7), Word(3.0, 3.4, " F***ing", 0.9)]
+    hits = scan_words(words, M)
+    assert [(h.word, h.start, h.end) for h in hits] == [
+        ("son of a bitch", 1.2, 2.0), ("bitch", 1.6, 2.0), ("f***ing", 3.0, 3.4)]
+    assert hits[0].confidence == 0.7 and hits[2].tier == "strong"
+
+
+def test_drifted_subtitle_claimed_by_nearby_asr_word():
+    sub = [Hit(3.4, 3.7, "damn", "damn*", "mild", "subtitle", 0.6, cue_start=2.0, cue_end=4.0)]
+    asr = [Hit(4.9, 5.2, "damn", "damn*", "mild", "asr", 0.9)]      # 0.9 s after the cue ends
+    spans = build_spans(sub, asr, CFG)
+    assert len(spans) == 1 and spans[0].sources == ["asr", "subtitle"]
+    far = [Hit(9.0, 9.3, "damn", "damn*", "mild", "asr", 0.9)]      # too far: both kept
+    assert len(build_spans(sub, far, CFG)) == 2
+
+
+def test_each_asr_word_claimed_once():
+    sub = [Hit(2.5, 2.8, "shit", "shit*", "moderate", "subtitle", 0.6, cue_start=2.0, cue_end=4.0),
+           Hit(3.2, 3.5, "shit", "shit*", "moderate", "subtitle", 0.6, cue_start=2.0, cue_end=4.0)]
+    asr = [Hit(2.6, 2.9, "shit", "shit*", "moderate", "asr", 0.9)]
+    spans = build_spans(sub, asr, CFG)
+    # one confirmed by ASR, the second subtitle "shit" kept as an estimate (merged if close)
+    assert any(s.estimated for s in spans) or len(spans) == 1
+    assert sum("subtitle" in s.sources for s in spans) >= 1

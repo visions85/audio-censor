@@ -22,6 +22,7 @@ DEFAULTS: dict = {
         "subtitle_pad": 0.35,          # seconds added either side of an estimated subtitle hit
         "asr_pad": 0.10,               # seconds added either side of a recognized word
         "merge_gap": 0.25,             # spans closer than this are merged
+        "subtitle_drift": 2.0,         # an ASR word this far outside its cue still claims the subtitle hit
         "asr_only": True,              # keep ASR hits that no subtitle confirms
         "cache_transcript": True,      # save <file>.transcript.json so re-scans skip ASR
         "treat_asterisks_as_hit": True,
@@ -75,6 +76,7 @@ subtitle_mode = "estimate"  # estimate | cue
 subtitle_pad = 0.35
 asr_pad = 0.10
 merge_gap = 0.25
+subtitle_drift = 2.0
 asr_only = true
 cache_transcript = true
 

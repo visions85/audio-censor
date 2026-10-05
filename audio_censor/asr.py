@@ -75,7 +75,14 @@ def transcribe(wav: Path, cfg: dict, duration: float = 0.0, progress: bool = Tru
     device, compute_type = _resolve_device(acfg.get("device", "auto"), acfg.get("compute_type", "auto"))
     model_name = acfg.get("model", "small")
     eprint(f"  loading whisper model '{model_name}' on {device} ({compute_type}) ...")
-    model = WhisperModel(model_name, device=device, compute_type=compute_type)
+    try:
+        model = WhisperModel(model_name, device=device, compute_type=compute_type)
+    except Exception as exc:  # download failure, bad model name, missing CUDA libs ...
+        raise RuntimeError(
+            f"could not load whisper model {model_name!r} on {device}: {type(exc).__name__}: "
+            f"{str(exc).splitlines()[-1] if str(exc) else exc}\n"
+            "  (models download from huggingface.co on first use; pass --no-asr to scan subtitles only)"
+        ) from exc
 
     language = acfg.get("language") or None
     segments, _info = model.transcribe(

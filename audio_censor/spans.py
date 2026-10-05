@@ -78,20 +78,29 @@ def build_spans(sub_hits: list[Hit], asr_hits: list[Hit], cfg: dict, duration: f
     merge_gap = float(scan.get("merge_gap", 0.25))
     keep_asr_only = bool(scan.get("asr_only", True))
     slack = 0.6  # subtitle timing is loose; allow ASR words slightly outside the cue
+    drift = float(scan.get("subtitle_drift", 2.0))  # fallback window for badly synced subtitles
 
     confirmed_asr: set[int] = set()
     spans: list[Span] = []
 
+    def claim(sh: Hit, cue_start: float, cue_end: float, window: float) -> int | None:
+        """Index of an ASR hit for the same word within the cue window (+/- window)."""
+        best = None
+        for i, ah in enumerate(asr_hits):
+            if i in confirmed_asr or not _same_pattern(sh, ah):
+                continue
+            if ah.start >= cue_start - window and ah.end <= cue_end + window:
+                dist = max(0.0, cue_start - ah.start, ah.end - cue_end)
+                if best is None or dist < best[0]:
+                    best = (dist, i)
+        return None if best is None else best[1]
+
     for sh in sub_hits:
         cue_start = sh.cue_start if sh.cue_start is not None else sh.start
         cue_end = sh.cue_end if sh.cue_end is not None else sh.end
-        match_idx = None
-        for i, ah in enumerate(asr_hits):
-            if ah.start >= cue_start - slack and ah.end <= cue_end + slack and _same_pattern(sh, ah):
-                if i not in confirmed_asr or match_idx is None:
-                    match_idx = i
-                    if i not in confirmed_asr:
-                        break
+        match_idx = claim(sh, cue_start, cue_end, slack)
+        if match_idx is None and drift > slack:
+            match_idx = claim(sh, cue_start, cue_end, drift)
         if match_idx is not None:
             confirmed_asr.add(match_idx)
             continue

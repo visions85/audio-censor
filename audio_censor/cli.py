@@ -193,10 +193,10 @@ def cmd_process(args, cfg) -> int:
             if out and not args.dry_run:
                 print(f"wrote {out}")
         except (MediaError, BeepError, UserError, RuntimeError) as exc:
-            failures += 1
-            eprint(f"error: {media.name}: {exc}")
             if not args.keep_going:
                 raise
+            failures += 1
+            eprint(f"error: {media.name}: {exc}")
     return 1 if failures else 0
 
 
