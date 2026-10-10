@@ -29,7 +29,8 @@ def test_play_dry_run_scans_and_builds_command(tmp_path, capsys):
     assert (tmp_path / "movie.censor.json").exists()
     cmd = err.split("command:")[1]
     assert "--script=" in cmd and "audio-censor.lua" in cmd
-    assert "--script-opts-append=audio-censor-mode=beep" in cmd
+    assert "--script-opts-append=audio-censor-mode=duck" in cmd
+    assert "--script-opts-append=audio-censor-duck=0.1" in cmd
     assert "--script-opts-append=audio-censor-frequency=800" in cmd
     assert re.search(r"audio-censor-subs=\S*movie\.en\.clean\.srt", cmd)
     assert "clean subtitles: 2 word(s) masked" in err

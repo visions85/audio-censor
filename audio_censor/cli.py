@@ -19,7 +19,8 @@ from .media import VIDEO_EXTS, MediaError, eprint, language_matches, pick_audio_
 from .names import NameDetector
 from .plex import ORDERS, PlexError, PlexRatings
 from .ratings import find_rating, should_skip
-from .render import default_output, remux_with_subtitles, render, render_preview
+from .render import (check_disk_space, default_output, finalize_in_place, is_clean_track, remux_with_subtitles,
+                     render, render_preview, temp_output_for)
 from .spans import Span, build_spans, format_table, load_sidecar, save_sidecar, sidecar_path, veto_by_subtitles
 from .subtitles import STYLES, find_subtitle_source, load_cues, scan_cues, write_clean_subtitles
 from .wordlist import TIERS, Matcher, active_tiers, load_default_tiers
@@ -74,6 +75,12 @@ def apply_overrides(cfg: dict, args: argparse.Namespace) -> dict:
         cfg["beep"]["channel"] = args.beep_channel
     if g("duck") is not None:
         cfg["beep"]["duck"] = args.duck
+        if not g("mode") and cfg["beep"]["mode"] == "mute":
+            cfg["beep"]["mode"] = "duck"
+    if g("in_place"):
+        cfg["output"]["in_place"] = True
+    if g("backup"):
+        cfg["output"]["backup"] = True
     if g("codec"):
         cfg["output"]["codec"] = args.codec
     if g("replace_audio"):
@@ -260,11 +267,41 @@ def _ignore_tags(cfg: dict) -> tuple[str, ...]:
     return tuple({tag, "clean"})
 
 
+def in_place(cfg: dict) -> bool:
+    return bool(cfg["output"].get("in_place", False))
+
+
 def resolve_output(media: Path, cfg: dict, args) -> Path:
+    if in_place(cfg):
+        return media.with_suffix(".mkv")
     if getattr(args, "output", None):
         return Path(args.output).expanduser()
     out_dir = Path(args.output_dir).expanduser() if getattr(args, "output_dir", None) else None
     return default_output(media, cfg, out_dir)
+
+
+def is_done(media: Path, cfg: dict, args, meta: dict | None = None) -> bool:
+    """Has this file been rendered already? In place: the span file records it; else the output exists."""
+    if in_place(cfg):
+        if meta is None:
+            side = sidecar_path(media)
+            meta = load_sidecar(side)[1] if side.exists() else {}
+        return bool(meta.get("rendered_in_place"))
+    return resolve_output(media, cfg, args).exists()
+
+
+def mark_rendered(media: Path, final: Path, cfg: dict) -> None:
+    """Record the render in the span file (status and the in-place skip rely on it)."""
+    side = sidecar_path(media)
+    if not side.exists():
+        return
+    spans, meta = load_sidecar(side)
+    meta = {k: v for k, v in meta.items() if k not in ("version", "source_file", "generated")}
+    meta["rendered_file"] = final.name
+    meta["rendered_at"] = time.strftime("%Y-%m-%dT%H:%M:%S")
+    if in_place(cfg):
+        meta["rendered_in_place"] = True
+    save_sidecar(side, media, spans, meta)
 
 
 def standalone_outputs(media: Path, cfg: dict, args) -> list[Path]:
@@ -304,7 +341,10 @@ def render_subtitles_only(media: Path, cfg: dict, args, meta: dict) -> tuple[Pat
                                      else f"{media.stem}{suffix}{src.path.suffix}")
         else:
             output = resolve_output(media, cfg, args)
-            name = f"{output.stem}.{lang}{src.path.suffix}" if lang else f"{output.stem}{src.path.suffix}"
+            if in_place(cfg):
+                name = f"{media.stem}.{lang}{suffix}{src.path.suffix}" if lang else f"{media.stem}{suffix}{src.path.suffix}"
+            else:
+                name = f"{output.stem}.{lang}{src.path.suffix}" if lang else f"{output.stem}{src.path.suffix}"
             target = output.parent / name if sub_cfg.get("sidecar", True) else work / name
         if dry_run:
             eprint(f"  clean subtitles: would write {target}")
@@ -316,6 +356,23 @@ def render_subtitles_only(media: Path, cfg: dict, args, meta: dict) -> tuple[Pat
                                       sub_cfg.get("replacement", "[BLEEP]"), NameDetector.from_config(cfg))
         eprint(f"  clean subtitles: {count} word(s) masked from {src.description} -> {target.name}")
         if mode == "remux":
+            if in_place(cfg):
+                if any(is_clean_track(x) for x in info.of_type("subtitle")) and not getattr(args, "overwrite", False):
+                    eprint(f"  {media.name} already has a clean subtitle track (--overwrite to replace it)")
+                    return None, "skipped"
+                check_disk_space(media)
+                tmp_out = temp_output_for(media)
+                try:
+                    remux_with_subtitles(media, info, target, lang, cfg, tmp_out, verbose=getattr(args, "verbose", False),
+                                         drop_clean=True)
+                except BaseException:
+                    tmp_out.unlink(missing_ok=True)
+                    raise
+                kept_subs = [x for x in info.of_type("subtitle") if not is_clean_track(x)]
+                final = finalize_in_place(media, tmp_out, expect_audio=len(info.of_type("audio")),
+                                          expect_subs=len(kept_subs) + 1, backup=bool(cfg["output"].get("backup")))
+                mark_rendered(media, final, cfg)
+                return final, "written"
             return remux_with_subtitles(media, info, target, lang, cfg, output, dry_run=dry_run,
                                         verbose=getattr(args, "verbose", False)), "written"
         return target, "written"
@@ -327,16 +384,42 @@ def render_file(media: Path, spans: list[Span], cfg: dict, args: argparse.Namesp
     dialogue = pick_audio_stream(info, cfg["languages"], audio_track)
     spec = BeepSpec.from_config(cfg)
     output = resolve_output(media, cfg, args)
+    dry_run = getattr(args, "dry_run", False)
+    overwrite = getattr(args, "overwrite", False)
     if not spans and not getattr(args, "force", False):
         eprint(f"  no spans to censor in {media.name}; skipping render (use --force to remux anyway)")
         return None
-    if output.exists() and not getattr(args, "overwrite", False) and not getattr(args, "dry_run", False):
-        raise UserError(f"{output} exists (use --overwrite)")
-    dry_run = getattr(args, "dry_run", False)
+    if is_done(media, cfg, args) and not overwrite and not dry_run:
+        raise UserError(f"{output.name} already rendered (use --overwrite)")
+    if in_place(cfg):
+        already = any(is_clean_track(a) for a in info.of_type("audio"))
+        if already and not overwrite and not dry_run:
+            raise UserError(f"{media.name} already has a clean track (use --overwrite to replace it)")
+        if not dry_run:
+            check_disk_space(media)
+        target = temp_output_for(media)
+        eprint(f"  in place: rewriting {media.name}" + (", replacing its existing clean track" if already else ""))
+    else:
+        target = output
     with tempfile.TemporaryDirectory(prefix="audio-censor-") as tmp:
         clean_subs, lang = prepare_clean_subtitles(media, info, cfg, args, output, Path(tmp), dry_run)
-        return render(media, info, dialogue, spans, spec, cfg, output, dry_run=dry_run,
-                      verbose=getattr(args, "verbose", False), clean_subs=clean_subs, clean_subs_lang=lang)
+        try:
+            out = render(media, info, dialogue, spans, spec, cfg, target, dry_run=dry_run,
+                         verbose=getattr(args, "verbose", False), clean_subs=clean_subs, clean_subs_lang=lang,
+                         drop_clean=in_place(cfg))
+        except BaseException:
+            if in_place(cfg):
+                target.unlink(missing_ok=True)
+            raise
+    if in_place(cfg) and not dry_run:
+        kept_audio = [a for a in info.of_type("audio") if not is_clean_track(a)]
+        kept_subs = [x for x in info.of_type("subtitle") if not is_clean_track(x)]
+        out = finalize_in_place(media, target, expect_audio=len(kept_audio) + 1,
+                                expect_subs=len(kept_subs) + (1 if clean_subs else 0),
+                                backup=bool(cfg["output"].get("backup", False)))
+    if not dry_run:
+        mark_rendered(media, out, cfg)
+    return out
 
 
 def prepare_clean_subtitles(media: Path, info, cfg: dict, args, output: Path, work: Path,
@@ -351,7 +434,11 @@ def prepare_clean_subtitles(media: Path, info, cfg: dict, args, output: Path, wo
         eprint("  clean subtitles: no subtitles found, skipping")
         return None, ""
     lang = src.language
-    name = f"{output.stem}.{lang}{src.path.suffix}" if lang else f"{output.stem}{src.path.suffix}"
+    if in_place(cfg):   # beside the original: Movie.en.clean.srt, never Movie.en.srt
+        tag = (sub_cfg.get("standalone_suffix") or ".clean").strip(".")
+        name = f"{media.stem}.{lang}.{tag}{src.path.suffix}" if lang else f"{media.stem}.{tag}{src.path.suffix}"
+    else:
+        name = f"{output.stem}.{lang}{src.path.suffix}" if lang else f"{output.stem}{src.path.suffix}"
     target = output.parent / name if sub_cfg.get("sidecar", True) else work / name
     if dry_run:
         eprint(f"  clean subtitles: would write {target}")
@@ -452,11 +539,12 @@ def cmd_render(args, cfg) -> int:
                 counts["not scanned"] += 1
                 continue
             output = resolve_output(media, cfg, args)
-            if output.exists() and not args.overwrite and not args.dry_run:
-                eprint(f"{media.name}: {output.name} exists, skipping (--overwrite to redo)")
+            spans, meta = load_sidecar(side)
+            if is_done(media, cfg, args, meta) and not args.overwrite and not args.dry_run:
+                eprint(f"{media.name}: " + ("already rendered in place" if in_place(cfg) else f"{output.name} exists")
+                       + ", skipping (--overwrite to redo)")
                 counts["skipped"] += 1
                 continue
-            spans, meta = load_sidecar(side)
             if meta.get("skipped"):
                 eprint(f"{media.name}: {meta['skipped']}, nothing to render")
                 counts["clean already"] += 1
@@ -498,13 +586,17 @@ def cmd_status(args, cfg) -> int:
                 state, detail = "nothing to do", meta["skipped"]
             elif meta.get("audio_censored") is False:
                 detail = f"audio {meta.get('audio_language') or '?'}, subtitles only"
-                done = output.exists() or bool(standalone_outputs(media, cfg, args))
+                done = bool(meta.get("rendered_in_place")) or bool(standalone_outputs(media, cfg, args)) \
+                    or (not in_place(cfg) and output.exists())
                 state = "rendered" if done else "scanned"
             else:
                 detail = f"{len(spans)} span(s), level {meta.get('level')}"
                 if meta.get("asr") in ("skipped", "unavailable", "disabled"):
                     detail += ", no asr"
-                state = "rendered" if output.exists() else ("scanned" if spans else "nothing to do")
+                done = meta.get("rendered_in_place") or (not in_place(cfg) and output.exists())
+                if done and meta.get("rendered_in_place"):
+                    detail += ", in place"
+                state = "rendered" if done else ("scanned" if spans else "nothing to do")
         totals[state] += 1
         rows.append((media, state, detail))
     def label(m: Path) -> str:
@@ -526,8 +618,9 @@ def cmd_process(args, cfg) -> int:
         pos = f"[{n}/{len(files)}] " if _is_batch(args, files) else ""
         try:
             output = resolve_output(media, cfg, args)
-            if output.exists() and not args.overwrite and not args.dry_run:
-                eprint(f"{pos}{media.name}: {output.name} exists, skipping (--overwrite to redo)")
+            if is_done(media, cfg, args) and not args.overwrite and not args.dry_run:
+                eprint(f"{pos}{media.name}: " + ("already rendered in place" if in_place(cfg) else f"{output.name} exists")
+                       + ", skipping (--overwrite to redo)")
                 counts["skipped"] += 1
                 continue
             spans, meta = scan_file(media, cfg, args, pos)
@@ -602,8 +695,8 @@ def cmd_init_config(args, cfg) -> int:
 
 def cmd_preview_beep(args, cfg) -> int:
     spec = BeepSpec.from_config(cfg)
-    if spec.mode == "mute":
-        raise UserError("beep.mode is 'mute'; nothing to preview")
+    if spec.mode != "beep":
+        raise UserError(f"beep.mode is '{spec.mode}'; pass --mode beep to preview a beep sound")
     out = Path(args.output).expanduser()
     render_preview(spec, out, duration=args.duration)
     print(f"wrote {out}  ({spec.wave}"
@@ -639,7 +732,7 @@ def cmd_play(args, cfg) -> int:
         cfg["level"] = meta["level"]
 
     spec = BeepSpec.from_config(cfg)
-    mode = "beep" if spec.mode == "beep" else ("duck" if spec.duck > 0 else "mute")
+    mode = spec.mode
     if spec.mode == "beep" and spec.wave == "file":
         eprint("  note: live playback uses a sine beep; custom sound files apply to rendered output only")
     opts = {"spans": str(side), "mode": mode, "duck": spec.duck, "frequency": spec.frequency,
@@ -711,7 +804,7 @@ def add_scan_options(p: argparse.ArgumentParser) -> None:
 
 def add_render_options(p: argparse.ArgumentParser) -> None:
     g = p.add_argument_group("beep sound")
-    g.add_argument("--mode", choices=["beep", "mute"])
+    g.add_argument("--mode", choices=["duck", "mute", "beep"])
     g.add_argument("--wave", choices=list(WAVES) + ["file"], help="beep waveform")
     g.add_argument("--frequency", type=float, metavar="HZ")
     g.add_argument("--volume", metavar="V", help="0..1 or decibels, written as --volume=-8dB")
@@ -729,6 +822,10 @@ def add_render_options(p: argparse.ArgumentParser) -> None:
     o.add_argument("--output-dir", metavar="DIR")
     o.add_argument("--codec", help="clean track codec (default: aac for stereo, ac3 for 5.1)")
     o.add_argument("--title", help="clean track title")
+    o.add_argument("--in-place", action="store_true",
+                   help="add the clean track to the original file (rewritten and verified, then swapped in) "
+                        "instead of writing Movie.clean.mkv")
+    o.add_argument("--backup", action="store_true", help="with --in-place, keep the original as Movie.orig.mkv")
     o.add_argument("--replace-audio", action="store_true", help="drop the original audio tracks")
     o.add_argument("--no-default", action="store_true", help="do not mark the clean track as default")
     o.add_argument("--overwrite", action="store_true")
@@ -790,7 +887,7 @@ def build_parser() -> argparse.ArgumentParser:
     sp.add_argument("--subtitles", metavar="FILE", help="subtitle file to censor instead of auto-detecting")
     sp.add_argument("--no-subs", action="store_true", help="do not load clean subtitles")
     sp.add_argument("--no-osd", action="store_true", help="do not flash the censored words on screen")
-    sp.add_argument("--mode", choices=["beep", "mute"])
+    sp.add_argument("--mode", choices=["duck", "mute", "beep"])
     sp.add_argument("--frequency", type=float, metavar="HZ")
     sp.add_argument("--volume", metavar="V", help="beep level 0..1")
     sp.add_argument("--duck", type=float, metavar="LEVEL")
@@ -829,7 +926,7 @@ def build_parser() -> argparse.ArgumentParser:
     sp.add_argument("-o", "--output", default="beep-preview.wav")
     sp.add_argument("-d", "--duration", type=float, default=1.0)
     for name, kw in (("--wave", dict(choices=list(WAVES) + ["file"])), ("--frequency", dict(type=float)),
-                     ("--volume", {}), ("--beep-file", {}), ("--mode", dict(choices=["beep", "mute"]))):
+                     ("--volume", {}), ("--beep-file", {}), ("--mode", dict(choices=["duck", "mute", "beep"]))):
         sp.add_argument(name, **kw)
     sp.set_defaults(func=cmd_preview_beep)
     return p

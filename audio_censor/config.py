@@ -48,24 +48,26 @@ DEFAULTS: dict = {
         "initial_prompt": DEFAULT_PROMPT,
     },
     "beep": {
-        "mode": "beep",                # beep | mute
-        "wave": "sine",                # sine | square | triangle | sawtooth | noise | file
+        "mode": "duck",                # duck (lower the dialogue) | mute | beep
+        "duck": 0.1,                   # dialogue level inside a span: 0.1 = -20 dB; also under a beep
+        "wave": "sine",                # beep mode: sine | square | triangle | sawtooth | noise | file
         "frequency": 1000,
-        "volume": 0.4,                 # linear 0..1, or a string like "-8dB"
+        "volume": 0.4,                 # beep level, linear 0..1 or a string like "-8dB"
         "file": "",                    # sound file used when wave = "file"
         "loop_file": True,             # loop a short file to fill long spans
         "fade": 0.01,                  # fade in/out seconds for each beep
         "channel": "center",           # center | all
-        "duck": 0.0,                   # residual dialogue level under the beep (0 = silent)
     },
     "output": {
         "suffix": ".clean",
         "container": "mkv",
         "codec": "auto",               # auto | aac | ac3 | eac3 | flac | opus ...
         "bitrate": "auto",
-        "title": "Clean (beeped)",
+        "title": "",                   # clean track title; empty = "Clean (ducked|muted|beeped)"
         "set_default": True,           # make the clean track the default audio
         "keep_original": True,         # keep the original audio tracks in the output
+        "in_place": False,             # rewrite the original file with the clean track added (no second copy)
+        "backup": False,               # in-place: keep the original as <name>.orig.<ext>
     },
     "subtitles": {
         "clean": True,                 # also produce censored subtitles
@@ -122,24 +124,26 @@ compute_type = "auto"
 language = "en"
 
 [beep]
-mode = "beep"               # beep | mute
-wave = "sine"               # sine | square | triangle | sawtooth | noise | file
+mode = "duck"               # duck | mute | beep
+duck = 0.1                  # dialogue level inside a span (0.1 = -20 dB, 0.03 = -30 dB)
+wave = "sine"               # beep mode only: sine | square | triangle | sawtooth | noise | file
 frequency = 1000
 volume = 0.4                # 0..1 or "-8dB"
 file = ""                   # e.g. "~/sounds/quack.wav" when wave = "file"
 loop_file = true
 fade = 0.01
 channel = "center"          # center | all
-duck = 0.0
 
 [output]
 suffix = ".clean"
 container = "mkv"
 codec = "auto"
 bitrate = "auto"
-title = "Clean (beeped)"
+title = ""                  # default "Clean (ducked)" / "Clean (muted)" / "Clean (beeped)"
 set_default = true
 keep_original = true
+in_place = false            # true: add the clean track to the original file instead of Movie.clean.mkv
+backup = false              # in-place only: keep Movie.orig.mkv
 
 [subtitles]
 clean = true                # write censored subtitles alongside the clean audio

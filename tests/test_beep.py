@@ -33,8 +33,17 @@ def test_gate_chunks():
     assert "between(t,0,0.5)" in g
 
 
+def test_default_mode_is_duck():
+    d = spec()
+    assert d.mode == "duck" and d.duck == 0.1
+    assert spec(mode="mute").duck == 0.0
+    assert spec(mode="duck", duck=0).mode == "mute"
+    g = build_filtergraph(SPANS, d, audio_label="0:a:0", layout="stereo", channels=2, rate=48000)
+    assert "volume=volume=0.1:enable=" in g and "aevalsrc" not in g
+
+
 def test_beep_graph_shape():
-    g = build_filtergraph(SPANS, spec(), audio_label="0:a:0", layout="5.1(side)", channels=6, rate=48000)
+    g = build_filtergraph(SPANS, spec(mode="beep", duck=0), audio_label="0:a:0", layout="5.1(side)", channels=6, rate=48000)
     assert g.startswith("[0:a:0]asetnsamples=n=240:p=0,volume=volume=0:enable=")
     assert "aevalsrc=exprs='0.4*sin(2*PI*1000*t)':s=48000:c=mono:d=0.5" in g
     assert "adelay=48000S:all=1[b0]" in g and "adelay=492000S:all=1[b1]" in g
@@ -43,15 +52,17 @@ def test_beep_graph_shape():
 
 
 def test_mute_graph_has_no_beeps():
-    g = build_filtergraph(SPANS, spec(mode="mute", duck=0.2), audio_label="0:a:1", layout="stereo", channels=2, rate=44100)
+    g = build_filtergraph(SPANS, spec(mode="duck", duck=0.2), audio_label="0:a:1", layout="stereo", channels=2, rate=44100)
     assert "aevalsrc" not in g and "amix" not in g
     assert "volume=volume=0.2:enable=" in g and g.endswith("[clean]")
+    g = build_filtergraph(SPANS, spec(mode="mute", duck=0.2), audio_label="0:a:1", layout="stereo", channels=2, rate=44100)
+    assert "volume=volume=0:enable=" in g
 
 
 def test_file_beep_graph(tmp_path):
     snd = tmp_path / "quack.wav"
     snd.write_bytes(b"RIFF")
-    s = spec(wave="file", file=str(snd))
+    s = spec(mode="beep", wave="file", file=str(snd))
     s.file_duration = 0.6
     g = build_filtergraph(SPANS, s, audio_label="0:a:0", layout="stereo", channels=2, rate=48000, file_input=1)
     assert "[1:a]asplit=2[src0][src1]" in g
@@ -62,12 +73,12 @@ def test_file_beep_graph(tmp_path):
 
 
 def test_no_spans_passthrough():
-    assert build_filtergraph([], spec(), audio_label="0:a:0", layout="stereo", channels=2, rate=48000) == "[0:a:0]anull[clean]"
+    assert build_filtergraph([], spec(mode="beep"), audio_label="0:a:0", layout="stereo", channels=2, rate=48000) == "[0:a:0]anull[clean]"
 
 
 def test_config_validation():
     with pytest.raises(BeepError):
-        spec(wave="file", file="")
+        spec(mode="beep", wave="file", file="")
     with pytest.raises(BeepError):
         spec(wave="klaxon")
     with pytest.raises(BeepError):

@@ -44,7 +44,8 @@ def movie(tmp_path):
 
 
 def test_process_adds_beeped_clean_track(movie, tmp_path):
-    rc = main(["process", str(movie), "--no-asr", "--level", "mild", "--wave", "sine", "--frequency", "1000"])
+    rc = main(["process", str(movie), "--no-asr", "--level", "mild", "--mode", "beep", "--duck", "0",
+               "--wave", "sine", "--frequency", "1000"])
     assert rc == 0
     out = movie.with_name("movie.clean.mkv")
     assert out.exists()
@@ -157,11 +158,13 @@ def test_two_phase_scan_then_render(movie, french_movie, tmp_path, capsys):
     assert "2 already scanned" in capsys.readouterr().out
 
     # phase two: render from the span files, with a beep chosen now
-    assert main(["render", str(tmp_path), "--wave", "square", "--frequency", "600"]) == 0
+    assert main(["render", str(tmp_path)]) == 0
     out = capsys.readouterr().out
     assert "2 file(s): 1 rendered, 1 subtitles only" in out
     assert (tmp_path / "movie.clean.mkv").exists() and (tmp_path / "french.en.clean.srt").exists()
-    assert probe(tmp_path / "movie.clean.mkv").of_type("audio")[1].title == "Clean (beeped)"
+    assert probe(tmp_path / "movie.clean.mkv").of_type("audio")[1].title == "Clean (ducked)"
+    # default mode ducks the dialogue to 0.1 (-20 dB) instead of beeping
+    assert abs(rms_db(tmp_path / "movie.clean.mkv", 1, 4.3, 5.5, "FC") - (rms_db(movie, 0, 4.3, 5.5, "FC") - 20)) < 1.5
 
     assert main(["status", str(tmp_path)]) == 0
     assert "2 file(s): 2 rendered" in capsys.readouterr().out
@@ -204,3 +207,61 @@ def test_batch_survives_unexpected_exception(movie, french_movie, tmp_path, caps
     assert "error: french.mkv: TypeError: open() got an unexpected keyword" in err
     assert "2 file(s): 1 scanned, 1 failed" in out
     assert (tmp_path / "movie.censor.json").exists()                               # the other file was still done
+
+
+def test_in_place_adds_track_to_original(movie, tmp_path, capsys):
+    (tmp_path / "movie.nfo").unlink(missing_ok=True)
+    size_before = movie.stat().st_size
+    assert main(["process", str(movie), "--no-asr", "--level", "mild", "--in-place"]) == 0
+    assert not (tmp_path / "movie.clean.mkv").exists() and not (tmp_path / "movie.clean.tmp.mkv").exists()
+    info = probe(movie)
+    audio = info.of_type("audio")
+    assert [a.title for a in audio] == ["", "Clean (ducked)"] and audio[1].default and not audio[0].default
+    assert [x.title for x in info.of_type("subtitle")] == ["Clean"]
+    assert movie.stat().st_size > size_before
+    # the clean subtitle sidecar must not clobber the original movie.en.srt
+    assert (tmp_path / "movie.en.srt").read_text() == SRT
+    assert "Oh, ****." in (tmp_path / "movie.en.clean.srt").read_text()
+    meta = (tmp_path / "movie.censor.json").read_text()
+    assert '"rendered_in_place": true' in meta
+
+    # second run: skipped, no duplicate track
+    assert main(["process", str(tmp_path), "--no-asr", "--level", "mild", "--in-place"]) == 0
+    assert "already rendered in place, skipping" in capsys.readouterr().err
+    assert len(probe(movie).of_type("audio")) == 2
+    assert main(["status", str(tmp_path)]) == 0
+    out = capsys.readouterr().out
+    assert "rendered" in out and "in place" in out
+
+    # --overwrite replaces the clean track instead of stacking another
+    assert main(["process", str(movie), "--no-asr", "--level", "mild", "--in-place", "--overwrite", "--mode", "mute"]) == 0
+    audio = probe(movie).of_type("audio")
+    assert [a.title for a in audio] == ["", "Clean (muted)"]
+    assert len(probe(movie).of_type("subtitle")) == 1
+
+
+def test_in_place_mp4_becomes_mkv(movie, tmp_path):
+    mp4 = tmp_path / "clip.mp4"
+    subprocess.run(["ffmpeg", "-y", "-v", "error", "-i", str(movie), "-map", "0:v", "-map", "0:a", "-c", "copy",
+                    "-metadata:s:a:0", "language=eng", str(mp4)], check=True)
+    (tmp_path / "clip.en.srt").write_text(SRT)
+    assert main(["process", str(mp4), "--no-asr", "--level", "mild", "--in-place", "--backup"]) == 0
+    assert not mp4.exists() and (tmp_path / "clip.mkv").exists() and (tmp_path / "clip.orig.mp4").exists()
+    assert len(probe(tmp_path / "clip.mkv").of_type("audio")) == 2
+
+
+def test_in_place_verification_failure_keeps_original(movie, tmp_path, monkeypatch, capsys):
+    import audio_censor.cli as cli
+    real = cli.finalize_in_place
+
+    def too_strict(media, tmp, expect_audio, expect_subs, backup=False):
+        return real(media, tmp, expect_audio + 5, expect_subs, backup)      # impossible expectation
+
+    monkeypatch.setattr(cli, "finalize_in_place", too_strict)
+    before = movie.read_bytes()
+    assert main(["scan", str(movie), "--no-asr", "--level", "mild"]) == 0
+    assert main(["render", str(movie), "--in-place"]) == 1
+    assert "in-place verification failed, original left untouched" in capsys.readouterr().err
+    assert movie.read_bytes() == before
+    assert not (tmp_path / "movie.clean.tmp.mkv").exists()
+    assert '"rendered_in_place"' not in (tmp_path / "movie.censor.json").read_text()

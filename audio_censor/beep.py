@@ -64,7 +64,7 @@ def parse_volume(value) -> float:
 
 @dataclass
 class BeepSpec:
-    mode: str = "beep"
+    mode: str = "duck"
     wave: str = "sine"
     frequency: float = 1000.0
     volume: float = 0.4
@@ -72,15 +72,15 @@ class BeepSpec:
     loop_file: bool = True
     fade: float = 0.01
     channel: str = "center"
-    duck: float = 0.0
+    duck: float = 0.1
     file_duration: float = 0.0   # filled in by the renderer (seconds), for aloop sizing
 
     @classmethod
     def from_config(cls, cfg: dict) -> "BeepSpec":
         b = cfg.get("beep", {})
-        mode = b.get("mode", "beep")
-        if mode not in ("beep", "mute"):
-            raise BeepError(f"beep.mode must be 'beep' or 'mute', got {mode!r}")
+        mode = b.get("mode", "duck")
+        if mode not in ("beep", "mute", "duck"):
+            raise BeepError(f"beep.mode must be 'beep', 'mute' or 'duck', got {mode!r}")
         wave = b.get("wave", "sine")
         if wave not in WAVES and wave != "file":
             raise BeepError(f"beep.wave must be one of {', '.join(WAVES)}, file; got {wave!r}")
@@ -95,9 +95,13 @@ class BeepSpec:
         channel = b.get("channel", "center")
         if channel not in ("center", "all"):
             raise BeepError("beep.channel must be 'center' or 'all'")
-        duck = float(b.get("duck", 0.0))
+        duck = float(b.get("duck", 0.1))
         if not 0 <= duck <= 1:
             raise BeepError("beep.duck must be between 0 and 1")
+        if mode == "mute":
+            duck = 0.0                     # mute is duck to silence
+        elif mode == "duck" and duck == 0:
+            mode = "mute"
         return cls(mode=mode, wave=wave, frequency=float(b.get("frequency", 1000)),
                    volume=parse_volume(b.get("volume", 0.4)), file=file,
                    loop_file=bool(b.get("loop_file", True)), fade=float(b.get("fade", 0.01)),
@@ -171,7 +175,7 @@ def build_filtergraph(spans: list[Span], spec: BeepSpec, *, audio_label: str, la
     lines = []
     gate = gate_filters(spans, spec.duck)
     # asetnsamples gives the timeline gate ~5 ms resolution instead of one decoder frame.
-    if spec.mode == "mute":
+    if spec.mode in ("mute", "duck"):
         lines.append(f"[{audio_label}]asetnsamples=n=240:p=0,{gate}[{out_label}]")
         return ";\n".join(lines)
 

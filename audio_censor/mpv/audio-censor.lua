@@ -152,11 +152,18 @@ end
 
 local function on_file_loaded()
     current = nil
-    local loaded, path = load_spans()
+    local loaded, path, doc = load_spans()
     spans = loaded or {}
     if not loaded then
         if path then msg.info("no span file (" .. path .. "); playing uncensored") end
         remove_filter()
+        return
+    end
+    if doc and doc.rendered_in_place then
+        -- the file already carries the clean track as its default audio: no live filter needed
+        msg.info("clean track rendered in place; not filtering")
+        remove_filter()
+        add_subs()
         return
     end
     msg.info(string.format("%d span(s) from %s, mode %s", #spans, path, o.mode))

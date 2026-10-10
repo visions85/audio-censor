@@ -1,7 +1,8 @@
 # audio-censor
 
 A Linux command-line tool that finds profanity in your film library and remuxes each
-file with an extra **"Clean"** audio track where every curse is replaced by a beep.
+file with an extra **"Clean"** audio track where every curse is ducked to near silence
+(or muted, or replaced by a beep).
 The original video, audio and subtitle tracks are left untouched. Pick the clean track
 in Plex, Jellyfin, Kodi, VLC or mpv when the kids are watching, and the original when
 they are not.
@@ -51,13 +52,35 @@ takes a couple of minutes; install faster-whisper's CUDA libraries and set
 
 ```bash
 audio-censor process Movie.mkv                     # scan + remux -> Movie.clean.mkv
-audio-censor process -r /media/films --keep-going  # whole library
+audio-censor process Movie.mkv --in-place          # add the clean track to Movie.mkv itself
+audio-censor process -r /media/films --in-place    # whole library
 audio-censor process Movie.mkv --level mild        # censor more (damn, hell, crap ...)
 audio-censor process Movie.mkv --no-asr            # subtitles only, fast
-audio-censor process Movie.mkv --wave square --frequency 440 --volume=-6dB
-audio-censor process Movie.mkv --beep-file ~/sounds/quack.wav
-audio-censor process Movie.mkv --mode mute --duck 0.1
+audio-censor process Movie.mkv --duck 0.03         # duck harder (-30 dB); default 0.1 = -20 dB
+audio-censor process Movie.mkv --mode mute
+audio-censor process Movie.mkv --mode beep --wave square --frequency 440 --volume=-6dB
+audio-censor process Movie.mkv --mode beep --beep-file ~/sounds/quack.wav
 ```
+
+### One copy of each film: `--in-place`
+
+By default the clean version is a second file, `Movie.clean.mkv`. With `--in-place`
+(or `in_place = true` under `[output]`) the clean track is added to the original
+instead. A Matroska file cannot have a track inserted without being rewritten, so the
+tool renders to `Movie.clean.tmp.mkv` in the same folder, checks it (duration, stream
+counts, size), swaps it over the original atomically and records the fact in the span
+file. The original tracks are all still inside; only the second copy is gone. A failed
+check leaves the original untouched. Notes:
+
+- You need free space equal to the film's size while it runs.
+- Non-MKV input (MP4, AVI) becomes `Movie.mkv`, since MKV is the container that holds
+  every kind of stream; `--backup` keeps the original as `Movie.orig.mp4`.
+- The clean track is marked default, so Plex and Jellyfin play it after a library
+  refresh. The original audio is one track switch away.
+- A re-run skips files already done; `--overwrite` re-renders and replaces the earlier
+  clean track rather than adding another.
+- If the file is hard-linked (seeding torrents, for example), the rewrite breaks the
+  link: the other name keeps the untouched original.
 
 Clean subtitles come along for free: the words found in the subtitle text are masked
 and written to `Movie.clean.en.srt` beside the output and embedded as a subtitle track
@@ -110,7 +133,7 @@ audio-censor install-mpv                 # from now on plain `mpv Movie.mkv` cen
 ```
 
 `play` launches mpv with the bundled `audio-censor.lua` script, which installs a live
-ffmpeg filter from the span file (beep, mute or duck following your `[beep]` config,
+ffmpeg filter from the span file (duck, mute or beep following your `[beep]` config,
 same timing precision as the rendered track, seeking included), loads censored
 subtitles, and flashes the censored words on screen so you can audit a scan before
 rendering. Alt+c toggles censoring during playback. After `install-mpv` the script runs
@@ -171,13 +194,16 @@ optional; command-line flags override the file.
 level = "moderate"          # strong | moderate | mild   (mild censors the most)
 
 [beep]
-mode = "beep"               # beep | mute
-wave = "sine"               # sine | square | triangle | sawtooth | noise | file
+mode = "duck"               # duck | mute | beep
+duck = 0.1                  # dialogue level inside a span: 0.1 = -20 dB, 0.03 = -30 dB
+wave = "sine"               # beep mode: sine | square | triangle | sawtooth | noise | file
 frequency = 1000
 volume = 0.4                # linear 0..1, or "-8dB"
 file = "~/sounds/boing.wav" # used when wave = "file"; short files loop to fill the span
 channel = "center"          # beep only in the dialogue channel of a 5.1 mix, or "all"
-duck = 0.0                  # how much of the original dialogue survives under the beep
+
+[output]
+in_place = true             # add the clean track to the original file
 
 [subtitles]
 clean = true
@@ -241,16 +267,16 @@ word regardless of context.
 ffmpeg does all the audio work in one pass, so a two-hour film remuxes in about the
 time it takes to re-encode one audio track:
 
-1. The chosen dialogue track is gated to silence (or ducked) inside every span, at
-   5 ms resolution.
-2. One beep is synthesized per span, faded in and out, and delayed to the span start.
-3. For surround tracks the beeps are placed in the center channel only, so music and
+1. The chosen dialogue track is ducked (default, to -20 dB), muted, or gated to silence
+   inside every span, at 5 ms resolution.
+2. In beep mode one beep is synthesized per span, faded in and out, delayed to the span
+   start, and for surround tracks placed in the center channel only, so music and
    effects in the other channels keep playing.
-4. The result is encoded (AAC for stereo, AC-3 for 5.1 by default; override with
-   `--codec`) and muxed as an additional audio track titled "Clean (beeped)", marked
+3. The result is encoded (AAC for stereo, AC-3 for 5.1 by default; override with
+   `--codec`) and muxed as an additional audio track titled "Clean (ducked)", marked
    default so players pick it automatically. Pass `--no-default` to keep the original
    as default or `--replace-audio` to drop the originals.
-5. The censored subtitle file is muxed in as a "Clean" subtitle track in the same pass.
+4. The censored subtitle file is muxed in as a "Clean" subtitle track in the same pass.
 
 Output defaults to `<name>.clean.mkv` beside the source. MP4 input works; text
 subtitles are converted to SRT for the MKV container.
