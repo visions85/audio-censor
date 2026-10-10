@@ -92,6 +92,11 @@ def load_default_tiers() -> dict[str, list[str]]:
     return tomllib.loads(data)["tiers"]
 
 
+def load_default_allow() -> list[str]:
+    data = resources.files("audio_censor").joinpath("data/default_words.toml").read_text("utf-8")
+    return list(tomllib.loads(data).get("allow", []))
+
+
 def active_tiers(level: str) -> tuple[str, ...]:
     """Tiers censored at a given level: 'mild' censors everything, 'strong' only the worst."""
     if level not in TIERS:
@@ -124,7 +129,7 @@ class Matcher:
         for tier in active_tiers(level):
             patterns += [compile_pattern(p, tier) for p in tiers.get(tier, [])]
         patterns += [compile_pattern(p, "strong") for p in wcfg.get("extra", [])]
-        allow = [compile_pattern(p, "allow") for p in wcfg.get("allow", [])]
+        allow = [compile_pattern(p, "allow") for p in load_default_allow() + list(wcfg.get("allow", []))]
         # Longest phrases first so "son of a bitch" wins over "bitch" at the same position.
         patterns.sort(key=len, reverse=True)
         return cls(patterns, allow, cfg.get("scan", {}).get("treat_asterisks_as_hit", True))
@@ -135,7 +140,12 @@ class Matcher:
         return all(_part_matches(part, words[i + k]) for k, part in enumerate(pattern.parts))
 
     def _allowed(self, words: list[str], i: int, j: int) -> bool:
-        return any(len(a) == j - i and self._try(a, words, i) for a in self.allow)
+        """True when an allow pattern covers words[i:j]; a longer phrase ("cum laude") exempts the hit inside it."""
+        for a in self.allow:
+            for start in range(max(0, j - len(a)), i + 1):
+                if self._try(a, words, start):
+                    return True
+        return False
 
     def find(self, tokens: list[Token]) -> list[Match]:
         words = [t.text for t in tokens]

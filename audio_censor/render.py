@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import functools
 import os
 import shutil
 import tempfile
@@ -12,6 +13,17 @@ from .media import MediaError, MediaInfo, Stream, eprint, probe, run
 from .spans import Span
 
 TEXT_SUBS_NEEDING_CONVERSION = {"mov_text", "tx3g"}
+
+
+@functools.lru_cache(maxsize=None)
+def filter_script_option() -> str:
+    """The ffmpeg option that reads a complex filtergraph from a file.
+
+    -filter_complex_script was deprecated in ffmpeg 7.0 and later removed; its
+    replacement, the generic "-/option file" syntax, does not exist before 7.0.
+    """
+    proc = run(["ffmpeg", "-hide_banner", "-h", "full"], check=False)
+    return "-filter_complex_script" if "-filter_complex_script" in (proc.stdout or "") else "-/filter_complex"
 
 
 def choose_codec(stream: Stream, cfg: dict) -> tuple[str, str | None]:
@@ -92,7 +104,7 @@ def build_command(media: Path, info: MediaInfo, dialogue: Stream, spans: list[Sp
     script_path.write_text(graph + "\n", encoding="utf-8")
 
     cmd = ["ffmpeg", "-y", "-hide_banner", "-loglevel", "warning", "-stats", *inputs,
-           "-filter_complex_script", str(script_path)]
+           filter_script_option(), str(script_path)]
 
     audio_streams = [a for a in info.of_type("audio") if not (drop_clean and is_clean_track(a))]
     kept_audio = audio_streams if keep_original else []

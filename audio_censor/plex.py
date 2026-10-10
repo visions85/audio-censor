@@ -38,12 +38,20 @@ def _fetch_json(url: str, token: str, timeout: float = 30.0) -> dict:
     req = urllib.request.Request(url, headers={"X-Plex-Token": token, "Accept": "application/json"})
     try:
         with urllib.request.urlopen(req, timeout=timeout) as resp:
-            return json.loads(resp.read().decode("utf-8"))
+            # Plex passes file names through as raw bytes, and old ones are not always UTF-8;
+            # surrogateescape keeps them comparable with what the local filesystem reports.
+            return json.loads(resp.read().decode("utf-8", errors="surrogateescape"))
     except urllib.error.HTTPError as exc:
         hint = " (bad token?)" if exc.code == 401 else ""
         raise PlexError(f"Plex returned HTTP {exc.code} for {url.split('?')[0]}{hint}") from exc
-    except (urllib.error.URLError, TimeoutError, ValueError) as exc:
+    except ValueError as exc:
+        raise PlexError(f"unreadable response from Plex for {url.split('?')[0]}: {exc}") from exc
+    except (urllib.error.URLError, TimeoutError) as exc:
         raise PlexError(f"could not reach Plex at {url.split('/library')[0]}: {exc}") from exc
+
+
+def _printable(text: str) -> str:
+    return text.encode("utf-8", errors="replace").decode("utf-8")
 
 
 def _parts(path: str) -> tuple[str, ...]:
@@ -119,7 +127,7 @@ class PlexRatings:
                     score = self._score(show)
                 entry = {"content": content, "score": score,
                          "added": int(item.get("addedAt") or 0), "views": int(item.get("viewCount") or 0),
-                         "title": item.get("grandparentTitle") or item.get("title") or ""}
+                         "title": _printable(item.get("grandparentTitle") or item.get("title") or "")}
                 for media in item.get("Media", []):
                     for part in media.get("Part", []):
                         if part.get("file"):
