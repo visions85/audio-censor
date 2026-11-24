@@ -6,6 +6,7 @@ import argparse
 import contextlib
 import os
 import shutil
+import signal
 import subprocess
 import sys
 import tempfile
@@ -13,7 +14,7 @@ import time
 from importlib import resources
 from pathlib import Path
 
-from . import __version__, asr, staging
+from . import __version__, asr, staging, thrash
 from .beep import BeepError, BeepSpec, WAVES
 from .config import default_config_path, load_config, write_template
 from .media import VIDEO_EXTS, MediaError, eprint, language_matches, pick_audio_stream, probe
@@ -24,7 +25,8 @@ from .ratings import find_rating, should_skip
 from .render import (check_disk_space, default_output, finalize_in_place, is_clean_track, remux_with_subtitles,
                      render, render_preview, temp_output_for)
 from .spans import Span, build_spans, format_table, load_sidecar, save_sidecar, sidecar_path, veto_by_subtitles
-from .subtitles import STYLES, find_subtitle_source, load_cues, scan_cues, write_clean_subtitles
+from .subtitles import (STYLES, find_external, find_subtitle_source, load_cues, pick_embedded, scan_cues,
+                        write_clean_subtitles)
 from .wordlist import TIERS, Matcher, active_tiers, load_default_tiers
 
 
@@ -189,6 +191,7 @@ def scan_file(media: Path, cfg: dict, args: argparse.Namespace, position: str = 
                     from .media import extract_audio_wav
                     extract_audio_wav(media, dialogue.type_index, wav)
                     words = asr.transcribe(wav, cfg, info.duration)
+                    asr.release_models()
                     if scan_cfg.get("cache_transcript", True):
                         asr.save_transcript(tpath, words, cfg["asr"]["model"], dialogue.type_index)
                 asr_hits = asr.scan_words(words, matcher, detector)
@@ -314,11 +317,48 @@ def _ocr_opts(cfg: dict, args=None) -> dict:
     return {"ocr": enabled, "ocr_cache": cache}
 
 
-def _stage(media: Path, cfg: dict, args, copies: int):
+def _stage(media: Path, cfg: dict, args, copies: int, render: bool = True):
     """Stage `media` on the local disk if configured (see staging.py), else use it where it is."""
     if staging.stage_dir(cfg, args) is None or _skips_by_rating(media, cfg, args):
         return contextlib.nullcontext(staging.Staged(media, media))
+    reads = _full_reads(media, cfg, args, render)
+    if reads <= 1:
+        # Copying in and back moves the same bytes as one read plus one write over the
+        # network, so with the scan cached it only adds time.
+        eprint(f"  staging: skipped, the film is read {'once' if reads else 'not at all'} "
+               "(transcript and subtitles are cached)")
+        return contextlib.nullcontext(staging.Staged(media, media))
     return staging.staged(media, cfg, args, copies)
+
+
+def _full_reads(media: Path, cfg: dict, args, render: bool) -> int:
+    """How many times this run will read the whole film: Whisper's audio, an embedded
+    subtitle track (extracted again when rendering clean subtitles), and the remux."""
+    scan = cfg["scan"]
+    use_cache = scan.get("cache_transcript", True) and not getattr(args, "rescan", False)
+    try:
+        info = probe(media)
+    except MediaError:
+        return 99
+    reads = 1 if render else 0
+    if scan["use_asr"] and asr.available():
+        cached = use_cache and asr.load_transcript(asr.transcript_path(media), cfg["asr"]["model"]) is not None
+        reads += 0 if cached else 1
+    explicit = getattr(args, "subtitles", None)
+    if scan["use_subtitles"] and not explicit and find_external(media, cfg["languages"], _ignore_tags(cfg)) is None:
+        clean_subs = render and cfg["subtitles"].get("clean", True) and not getattr(args, "no_clean_subs", False)
+        if pick_embedded(info, cfg["languages"]) is not None:
+            reads += 1 + bool(clean_subs)
+        else:
+            opts = _ocr_opts(cfg, args)
+            try:
+                from . import ocr          # needs numpy, an optional extra
+            except ImportError:
+                return reads
+            image = ocr.pick_image_stream(info, cfg["languages"]) if opts["ocr"] else None
+            if image is not None and not (opts["ocr_cache"] and ocr.load_cache(ocr.cache_path(media), image) is not None):
+                reads += 1
+    return reads
 
 
 def _skips_by_rating(media: Path, cfg: dict, args) -> bool:
@@ -574,7 +614,7 @@ def cmd_scan(args, cfg) -> int:
                        "--overwrite to redo")
                 counts["already scanned"] += 1
                 continue
-            with _stage(media, cfg, args, copies=1) as st:
+            with _stage(media, cfg, args, copies=1, render=False) as st:
                 spans, meta = scan_file(st.local, cfg, args, pos, origin=media)
                 save_sidecar(sidecar_path(st.local), st.local, spans, meta)
             if meta.get("skipped"):
@@ -1061,7 +1101,11 @@ def main(argv: list[str] | None = None) -> int:
     try:
         cfg = load_config(args.config)
         cfg = apply_overrides(cfg, args)
-        return args.func(args, cfg)
+        # SIGTERM unwinds like Ctrl-C, so staging cleanup and the thrash guard still run.
+        signal.signal(signal.SIGTERM, lambda signum, frame: sys.exit(143))
+        heavy = args.func in (cmd_process, cmd_scan, cmd_render) and not getattr(args, "dry_run", False)
+        with thrash.relaxed(heavy and bool(cfg.get("system", {}).get("relax_thrash_guard", False))):
+            return args.func(args, cfg)
     except (MediaError, BeepError, UserError, FileNotFoundError, FileExistsError, RuntimeError, ValueError) as exc:
         eprint(f"error: {exc}")
         return 1

@@ -20,6 +20,8 @@ def server(monkeypatch):
         if method == "POST":
             state["posts"].append(url)
             return {}
+        if "SearchTerm=" in url:
+            return {"Items": state.get("search", [])}
         if "IncludeItemTypes" in url:
             return {"Items": state["items"]}
         if "Ids=a1" in url:
@@ -37,7 +39,7 @@ def test_refresh_waits_for_the_clean_track(server):
     j = Jellyfin("10.0.0.5:8096", "k3y")
     msg = j.refresh_clean(Path("/mnt/share/Movies/Heat (1995)/Heat (1995).mkv"))
     assert msg == "refreshed; 'Clean (muted)' is the default track"
-    assert server["posts"][0].startswith("http://10.0.0.5:8096/Items/a1/Refresh?metadataRefreshMode=Default")
+    assert server["posts"][0].startswith("http://10.0.0.5:8096/Items/a1/Refresh?metadataRefreshMode=FullRefresh")
     assert server["polls"] == 2
 
 
@@ -64,3 +66,10 @@ def test_config_and_env(monkeypatch):
     monkeypatch.setenv("JELLYFIN_API_KEY", "abc")
     j = Jellyfin.from_config({})
     assert j.url == "http://jf:8096" and j.key == "abc"
+
+
+def test_falls_back_to_search_when_the_listing_misses_the_film(server):
+    hidden = "/movies/Home Alone (1990) {imdb-tt0099785}/Home Alone (1990).mkv"
+    server["search"] = [{"Id": "h1", "Path": hidden}, {"Id": "h2", "Path": "/movies/Home Alone 2/x.mkv"}]
+    j = Jellyfin("http://jf", "k3y")
+    assert j.item_id(Path("/mnt/share/Home Alone (1990) {imdb-tt0099785}/Home Alone (1990).mkv")) == "h1"

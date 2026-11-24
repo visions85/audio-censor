@@ -104,3 +104,17 @@ def test_leftovers_from_a_killed_run_are_cleared(share):
     with staging.staged(film, cfg) as st:
         assert not (st.local.parent / "Film.clean.mkv").exists()
         assert (st.local.parent / "Film.en.srt").exists()
+
+
+def test_copy_back_sends_films_first_and_the_span_file_last(share, monkeypatch):
+    film, root, cfg = share
+    monkeypatch.setattr(staging, "SIDECAR_LIMIT", 100)
+    order = []
+    real = staging._copy
+    with staging.staged(film, cfg) as st:
+        st.local.write_bytes(b"y" * 2000)                              # rewritten in place
+        (st.local.parent / "Film.censor.json").write_text("{}")
+        (st.local.parent / "Film.eng.clean.srt").write_text("x")
+        (st.local.parent / "Film.transcript.json").write_text("[]")
+        monkeypatch.setattr(staging, "_copy", lambda s, d: (order.append(s.name), real(s, d)))
+    assert order[0] == "Film.mkv" and order[-1] == "Film.censor.json"

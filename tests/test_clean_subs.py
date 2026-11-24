@@ -70,3 +70,17 @@ def test_own_clean_outputs_are_not_a_subtitle_source(tmp_path):
     (tmp_path / "Movie.en.srt").write_text("x")
     assert find_external(media, ["eng", "en"]).name == "Movie.en.srt"
     assert _language_tag(media, tmp_path / "Movie.en.clean.srt") == "en"
+
+
+
+def test_own_clean_track_is_never_the_scan_source():
+    from pathlib import Path as P
+    from audio_censor.media import MediaInfo, Stream
+    from audio_censor.subtitles import pick_embedded
+    def sub(i, codec, title):
+        return Stream(index=i, type_index=i, codec_type="subtitle", codec_name=codec, language="eng",
+                      title=title, default=False)
+    info = MediaInfo(P("x.mkv"), 1.0, [sub(0, "hdmv_pgs_subtitle", "English"), sub(1, "subrip", "Clean")])
+    assert pick_embedded(info, ["eng"]) is None            # falls through to OCR of the original
+    info.streams.append(sub(2, "subrip", "English SDH"))
+    assert pick_embedded(info, ["eng"]).type_index == 2

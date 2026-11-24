@@ -108,10 +108,20 @@ def language_matches(lang: str, preferred: list[str]) -> bool:
     return bool(lang) and any(lang == p.lower() or lang.startswith(p.lower()) for p in preferred)
 
 
+def is_own_clean_audio(stream: Stream) -> bool:
+    """A "Clean (muted|ducked|beeped)" track this tool added: never the dialogue source."""
+    t = (stream.title or "").strip()
+    return t.startswith("Clean (") and t.endswith(")")
+
+
 def pick_audio_stream(info: MediaInfo, languages: list[str], requested: int | None = None) -> Stream:
     audio = info.of_type("audio")
     if not audio:
         raise MediaError(f"{info.path.name} has no audio streams")
+    if requested is None:
+        # After an in-place render the clean track is the default; re-scans must still
+        # work from the original dialogue, not a censored, re-encoded copy of it.
+        audio = [s for s in audio if not is_own_clean_audio(s)] or audio
     if requested is not None:
         for s in audio:
             if s.type_index == requested:

@@ -56,8 +56,13 @@ def find_external(media: Path, languages: list[str], ignore_tags: tuple[str, ...
     return candidates[0][1] if candidates[0][0] > 0 else None
 
 
+def _ours(stream: Stream) -> bool:
+    """The censored "Clean" subtitle track an in-place render added: never a scanning source."""
+    return (stream.title or "").strip().lower() == CLEAN_TAG
+
+
 def pick_embedded(info: MediaInfo, languages: list[str]) -> Stream | None:
-    subs = [s for s in info.of_type("subtitle") if s.codec_name in TEXT_SUB_CODECS]
+    subs = [s for s in info.of_type("subtitle") if s.codec_name in TEXT_SUB_CODECS and not _ours(s)]
     if not subs:
         return None
     is_forced = lambda s: "forced" in (s.title or "").lower()

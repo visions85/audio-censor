@@ -213,6 +213,22 @@ parent folder plus filename when Plex sees the files under a different mount
 (`[plex.path_map]` handles that explicitly). Local NFOs take priority over Plex. Films
 with no rating anywhere are scanned normally. `--ignore-rating` overrides the skip.
 
+### Runs killed with free memory (CachyOS and other MGLRU kernels)
+
+Some kernels set `/sys/kernel/mm/lru_gen/min_ttl_ms`, a thrashing guard that makes the
+kernel kill a process whenever recently used memory cannot be kept that many
+milliseconds. At 100 ms it fires during a remux or a 50 GB copy to a network share,
+even with gigabytes free (`dmesg` shows "kswapd0 invoked oom-killer"). With
+
+```toml
+[system]
+relax_thrash_guard = true
+```
+
+`process`, `scan` and `render` set it to 0 while they work (through `sudo -n`, so
+passwordless sudo for `tee` is needed) and restore the old value when they finish.
+Overlapping runs share it, and a run that was killed outright is cleaned up by the next.
+
 ### Plex and Jellyfin play the clean track
 
 Plex remembers the last audio track chosen for each film, and that choice beats the

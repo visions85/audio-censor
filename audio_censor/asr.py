@@ -95,6 +95,14 @@ def _preload_cuda_libs() -> None:
 _MODELS: dict = {}
 
 
+def release_models() -> None:
+    """Drop loaded Whisper models (~3 GB of RAM plus VRAM for large-v3) once transcription
+    is done, so the remux and the copy back do not run with it still resident."""
+    _MODELS.clear()
+    import gc
+    gc.collect()
+
+
 def load_wav(path: Path):
     """16 kHz mono PCM WAV -> float32 numpy array in [-1, 1].
 

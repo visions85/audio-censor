@@ -13,6 +13,7 @@ from __future__ import annotations
 
 import json
 import os
+import re
 import time
 import urllib.error
 import urllib.parse
@@ -95,7 +96,13 @@ class Jellyfin:
             ids = set(index.get(parts[-n:], [])) if len(parts) >= n else set()
             if len(ids) == 1:
                 return ids.pop()
-        return None
+        # Jellyfin's full listing can leave items out (seen with Home Alone) that its
+        # search still finds: search by the folder's title and match the path.
+        title = re.sub(r"\s*[\[({].*$", "", Path(s).parent.name).strip() or Path(s).stem
+        data = self._get("/Items", Recursive="true", IncludeItemTypes="Movie,Episode", Fields="Path",
+                         SearchTerm=title)
+        ids = {i["Id"] for i in data.get("Items", []) if _parts(i.get("Path") or "")[-2:] == parts[-2:]}
+        return ids.pop() if len(ids) == 1 else None
 
     def _audio_streams(self, item_id: str, target: Path) -> list[dict]:
         data = self._get("/Items", Ids=item_id, Fields="MediaSources,MediaStreams,Path")
@@ -115,7 +122,9 @@ class Jellyfin:
         item = self.item_id(media) or self.item_id(target)
         if item is None:
             return "not in the Jellyfin library (yet); scan the library, then run 'audio-censor media-select'"
-        q = urllib.parse.urlencode({"metadataRefreshMode": "Default", "imageRefreshMode": "Default",
+        # FullRefresh re-reads the file's tracks even when its date is unchanged (an in-place
+        # rewrite keeps the old date); replaceAllMetadata=false keeps titles, art and edits.
+        q = urllib.parse.urlencode({"metadataRefreshMode": "FullRefresh", "imageRefreshMode": "Default",
                                     "replaceAllMetadata": "false", "replaceAllImages": "false"})
         _request(f"{self.url}/Items/{item}/Refresh?{q}", self.key, method="POST")
         deadline = time.time() + wait

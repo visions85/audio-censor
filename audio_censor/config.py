@@ -93,6 +93,10 @@ DEFAULTS: dict = {
         "select_clean": True,          # after a render, make Plex play the clean track (it remembers the
                                        # last track chosen per film, which beats the file's default flag)
     },
+    "system": {
+        "relax_thrash_guard": False,   # set the kernel's MGLRU thrashing guard (lru_gen/min_ttl_ms) to 0
+                                       # while process/scan/render run, restored after; needs sudo -n
+    },
     "jellyfin": {
         "url": "",                     # e.g. "http://unraid:8096"; or env JELLYFIN_URL
         "api_key": "",                 # Dashboard -> API Keys; or env JELLYFIN_API_KEY

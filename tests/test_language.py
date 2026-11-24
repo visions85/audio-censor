@@ -52,3 +52,15 @@ def test_verbose_and_config_accepted_after_subcommand():
     assert a.verbose is True and b.verbose is True and c.verbose is False
     assert build_parser().parse_args(["render", "x.mkv", "-c", "my.toml"]).config == "my.toml"
     assert build_parser().parse_args(["render", "x.mkv"]).config is None
+
+
+
+def test_own_clean_track_is_never_the_dialogue_source():
+    from pathlib import Path as P
+    from audio_censor.media import MediaInfo, Stream, pick_audio_stream
+    def a(i, title, default):
+        return Stream(index=i, type_index=i, codec_type="audio", codec_name="ac3", language="eng",
+                      title=title, default=default, channels=6)
+    info = MediaInfo(P("x.mkv"), 1.0, [a(0, "DTS 5.1", False), a(1, "Commentary", False), a(2, "Clean (muted)", True)])
+    assert pick_audio_stream(info, ["eng"]).type_index == 0
+    assert pick_audio_stream(info, ["eng"], requested=2).type_index == 2     # explicit choice still wins

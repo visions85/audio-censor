@@ -1,4 +1,5 @@
 import json
+import urllib.parse
 from pathlib import Path
 
 import pytest
@@ -150,7 +151,8 @@ def test_select_clean_audio_refreshes_waits_and_selects(plex_api):
     msg = p.select_clean_audio(Path("/data/Movies/Heat (1995)/Heat (1995).mkv"))
     assert "selected 'Clean (muted)'" in msg
     assert plex_api["sent"][0] == "http://plex:32400/library/metadata/42/refresh"
-    assert plex_api["sent"][1] == "http://plex:32400/library/parts/900?audioStreamID=2&allParts=1"
+    assert plex_api["sent"][1] == "http://plex:32400/library/metadata/42/analyze"
+    assert plex_api["sent"][2] == "http://plex:32400/library/parts/900?audioStreamID=2&allParts=1"
     assert plex_api["polls"] == 2          # waited one round for Plex to notice the new track
 
 
@@ -158,7 +160,7 @@ def test_select_clean_audio_gives_up_and_skips_when_selected(plex_api):
     p = PlexRatings("http://plex:32400", "secret")
     plex_api["streams_after"] = [ORIG]
     msg = p.select_clean_audio(Path("/data/Movies/Heat (1995)/Heat (1995).mkv"), wait=0)
-    assert "has not picked up" in msg and len(plex_api["sent"]) == 1   # refresh only
+    assert "has not picked up" in msg and len(plex_api["sent"]) == 2   # refresh + analyze only
     plex_api["streams_after"] = [dict(ORIG, selected=False), dict(CLEAN, selected=True)]
     plex_api["polls"] = 1
     assert "already selected" in p.select_clean_audio(Path("/data/Movies/Heat (1995)/Heat (1995).mkv"))
@@ -166,5 +168,38 @@ def test_select_clean_audio_gives_up_and_skips_when_selected(plex_api):
 
 def test_select_clean_audio_unknown_file(plex_api):
     p = PlexRatings("http://plex:32400", "secret")
-    assert "not in the Plex library" in p.select_clean_audio(Path("/elsewhere/Nope.mkv"))
+    assert "not in the Plex library" in p.select_clean_audio(Path("/elsewhere/Nope.mkv"), wait=0)
     assert plex_api["sent"] == []
+
+
+def test_unknown_file_triggers_a_folder_scan_then_is_found(monkeypatch, tmp_path):
+    """A fresh download Plex has not indexed: scan its folder, re-read the index, select."""
+    state = {"scanned": [], "indexed": False, "sent": []}
+    new_file = "/data/Movies/Uncle Buck (1989)/Uncle Buck NEW.mkv"
+
+    def fake_fetch(url, token, timeout=30.0):
+        if url.endswith("/library/sections"):
+            return {"MediaContainer": {"Directory": [{"key": "1", "type": "movie",
+                                                      "Location": [{"path": "/data/Movies"}]}]}}
+        if "sections/1/all?type=1" in url:
+            items = [{"ratingKey": "7", "title": "Uncle Buck", "Media": [{"Part": [{"file": new_file}]}]}]
+            return {"MediaContainer": {"Metadata": items if state["indexed"] else []}}
+        if url.endswith("/library/metadata/7"):
+            return _item_with_streams([ORIG, CLEAN], file=new_file)
+        raise AssertionError(url)
+
+    monkeypatch.setattr(plex, "_fetch_json", fake_fetch)
+    def fake_send(url, token, method="PUT", timeout=30.0):
+        if "/refresh?path=" in url:
+            assert method == "GET"            # Plex answers a scan with an empty body
+            state["scanned"].append(urllib.parse.unquote(url.split("path=")[1]))
+            state["indexed"] = True
+        state["sent"].append(url)
+
+    monkeypatch.setattr(plex, "_send", fake_send)
+    monkeypatch.setattr(plex, "_cache_path", lambda: tmp_path / "cache.json")
+    monkeypatch.setattr(plex.time, "sleep", lambda s: None)
+    p = PlexRatings("http://plex:32400", "secret")
+    msg = p.select_clean_audio(Path("/mnt/share/Movies/Uncle Buck (1989)/Uncle Buck NEW.mkv"))
+    assert state["scanned"] == ["/data/Movies/Uncle Buck (1989)"]
+    assert "selected 'Clean (muted)'" in msg

@@ -25,6 +25,7 @@ NETWORK_FS = {"nfs", "nfs4", "cifs", "smb3", "smbfs", "fuse.sshfs", "fuse.rclone
               "glusterfs", "fuse.glusterfs", "davfs", "fuse.s3fs", "fuse.mergerfs", "fuse.shfs"}
 SIDECAR_LIMIT = 200 * 1024 * 1024      # copy files sharing the film's name up to this size (subs, caches)
 MARGIN = 2 * 1024 ** 3                  # keep this much free on the staging disk
+FLUSH_EVERY = 256 * 1024 * 1024         # big copies are synced and dropped from the page cache this often
 
 
 @dataclass
@@ -102,10 +103,22 @@ def _copy_with_progress(src: Path, dst: Path) -> None:
     total = src.stat().st_size
     done, t0, last = 0, time.time(), 0.0
     live = sys.stderr.isatty()
+    synced = 0
     with open(src, "rb") as fin, open(dst, "wb") as fout:
         while chunk := fin.read(16 * 1024 * 1024):
             fout.write(chunk)
             done += len(chunk)
+            if done - synced >= FLUSH_EVERY or done == total:
+                # Write out and drop what is copied: a 50 GB copy to a slow share otherwise
+                # piles up unwritten pages until the kernel's out-of-memory killer steps in.
+                fout.flush()
+                os.fsync(fout.fileno())
+                for fd in (fin.fileno(), fout.fileno()):
+                    try:
+                        os.posix_fadvise(fd, 0, done, os.POSIX_FADV_DONTNEED)
+                    except (AttributeError, OSError):
+                        pass
+                synced = done
             now = time.time()
             if now - last >= (1 if live else 30) or done == total:
                 last = now
@@ -220,6 +233,14 @@ def _copy_back(folder: Path, dest: Path, before: dict[str, tuple[int, int]], ok:
     if big:
         total = sum(p.stat().st_size for p in big)
         eprint(f"  staging: copying {_fmt_size(total)} back to {dest} ...")
+    # Order matters if the run is killed part-way: the films go first, then subtitles and
+    # caches, and the span file (which records "rendered") last, so it never claims a
+    # result that has not reached the share.
+    def order(p: Path) -> tuple[int, str]:
+        if p.name.endswith(".censor.json"):
+            return 2, p.name
+        return (0 if p.stat().st_size > SIDECAR_LIMIT else 1), p.name
+    changed.sort(key=order)
     for p in changed:
         _copy(p, dest / p.name)
     if changed:

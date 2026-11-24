@@ -208,6 +208,29 @@ class PlexRatings:
                         return part
         return None
 
+    def _scan_for(self, media: Path, target: Path, deadline: float, poll: float) -> dict | None:
+        """A file Plex has not seen (a fresh download, a renamed release): ask every movie
+        and show library to scan a folder of that name, then re-read the index until it
+        appears or time runs out."""
+        sections = _fetch_json(f"{self.url}/library/sections", self.token)
+        folder = media.parent.name
+        for sec in (sections.get("MediaContainer") or {}).get("Directory", []):
+            if sec.get("type") not in ("movie", "show"):
+                continue
+            for loc in sec.get("Location", []):
+                root = (loc.get("path") or "").rstrip("/\\")
+                if not root:
+                    continue
+                q = urllib.parse.urlencode({"path": f"{root}/{folder}"}, quote_via=urllib.parse.quote)
+                _send(f"{self.url}/library/sections/{sec['key']}/refresh?{q}", self.token, method="GET")
+        while time.time() < deadline:
+            time.sleep(max(poll, 10.0))
+            self.use_cache, self._index, self._by_tail = False, None, {}
+            info = self.info_for(media) or self.info_for(target)
+            if info and info.get("key"):
+                return info
+        return None
+
     def select_clean_audio(self, media: Path, target: Path | None = None, wait: float = 90.0,
                            poll: float = 3.0) -> str:
         """Make Plex play the clean track of `target` (the file holding it; default `media`).
@@ -218,12 +241,18 @@ class PlexRatings:
         The choice is stored for the account whose token is used. Returns a log line.
         """
         target = target or media
+        deadline = time.time() + wait
         info = self.info_for(media) or self.info_for(target)
         if not info or not info.get("key"):
-            return "not in the Plex library (yet); scan the library, then run 'audio-censor plex-select'"
+            info = self._scan_for(media, target, deadline, poll)
+        if not info or not info.get("key"):
+            return "not in the Plex library (yet); scan the library, then run 'audio-censor media-select'"
         key = info["key"]
         _send(f"{self.url}/library/metadata/{key}/refresh", self.token)
-        deadline = time.time() + wait
+        # A file rewritten in place keeps its old modification time, which is how Plex
+        # decides whether to re-read it; analyze makes it read the tracks regardless.
+        _send(f"{self.url}/library/metadata/{key}/analyze", self.token)
+        deadline = max(deadline, time.time() + min(wait, 30))   # a folder scan may have used up the wait
         while True:
             part = self._part_for(key, target)
             streams = (part or {}).get("Stream", [])
