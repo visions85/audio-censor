@@ -140,3 +140,81 @@ class Jellyfin:
         if s.get("IsDefault"):
             return f"refreshed; '{s.get('Title')}' is the default track"
         return f"refreshed, but Jellyfin does not see '{s.get('Title')}' as default"
+
+    # ------------------------------------------------------------------ skip segments
+
+    def skip_segments(self, item: str) -> list[tuple[float, float]]:
+        data = self._get(f"/MediaSegments/{item}")
+        return [(s["StartTicks"] / 1e7, s["EndTicks"] / 1e7) for s in data.get("Items", [])
+                if s.get("Type") == "Commercial"]
+
+    def refresh_skips(self, media: Path, expected: int) -> str:
+        """Re-read the film's chapters and start Jellyfin's segment scan; does not wait.
+
+        Jellyfin only builds segments in its library-wide "Media Segment Scan" (about ten
+        minutes on a large library) and has no per-film call, so the result shows up later:
+        `audio-censor skip FILM` (no ranges) reports what Jellyfin has by then."""
+        item = self.item_id(media)
+        if item is None:
+            return "not in the Jellyfin library (yet)"
+        q = urllib.parse.urlencode({"metadataRefreshMode": "FullRefresh", "imageRefreshMode": "Default",
+                                    "replaceAllMetadata": "false", "replaceAllImages": "false"})
+        _request(f"{self.url}/Items/{item}/Refresh?{q}", self.key, method="POST")
+        time.sleep(15)                                   # let the refresh read the new chapters
+        how = self.start_segment_scan()
+        return (f"chapters refreshed and {how}; the {expected} segment(s) appear when it finishes "
+                "(about 15 min); check with: audio-censor skip FILE")
+
+    def start_segment_scan(self) -> str:
+        """Start the library-wide Media Segment Scan (a refresh clears a film's segments;
+        only this scan rebuilds them)."""
+        tasks = self._get("/ScheduledTasks")
+        task = next((t for t in (tasks if isinstance(tasks, list) else [])
+                     if t.get("Key") == "TaskExtractMediaSegments"), None)
+        if task is None:
+            return "found no Media Segment Scan task (is the Chapter Segments Provider plugin installed?)"
+        if task.get("State") == "Running":
+            return "its Media Segment Scan is already running"
+        _request(f"{self.url}/ScheduledTasks/Running/{task['Id']}", self.key, method="POST")
+        return "started its Media Segment Scan"
+
+    def skip_status(self, media: Path) -> str:
+        item = self.item_id(media)
+        if item is None:
+            return "not in the Jellyfin library"
+        found = self.skip_segments(item)
+        spans = ", ".join(f"{int(a // 60)}:{int(a % 60):02d}-{int(b // 60)}:{int(b % 60):02d}" for a, b in found)
+        return f"{len(found)} skip segment(s) in Jellyfin" + (f": {spans}" if spans else "")
+
+    # ------------------------------------------------------------------ editions
+
+    def add_version(self, original: Path, new_file: Path, wait: float = 180.0, poll: float = 5.0) -> str:
+        """Announce `new_file` (beside `original`) and merge it into the original's item as
+        a second version. Jellyfin groups versions by itself only when every file name
+        starts with the folder name, which download-client names rarely do."""
+        orig = self.item_id(original)
+        if orig is None:
+            return "the original is not in the Jellyfin library"
+        data = self._get("/Items", Ids=orig, Fields="Path,MediaSources")
+        items = data.get("Items", [])
+        paths = [s.get("Path") or "" for i in items for s in i.get("MediaSources") or [{"Path": i.get("Path")}]]
+        if any(_parts(p)[-1:] == _parts(str(new_file))[-1:] for p in paths):
+            return "already a version of the film"
+        jf_path = str(Path(items[0].get("Path") or "").with_name(new_file.name)) if items else ""
+        body = json.dumps({"Updates": [{"Path": jf_path, "UpdateType": "Created"}]}).encode()
+        req = urllib.request.Request(f"{self.url}/Library/Media/Updated", data=body, method="POST", headers={
+            "Authorization": f'MediaBrowser Client="audio-censor", Token="{self.key}"',
+            "Content-Type": "application/json"})
+        try:
+            urllib.request.urlopen(req, timeout=30).read()
+        except (urllib.error.URLError, TimeoutError) as exc:
+            raise JellyfinError(f"could not notify Jellyfin of {new_file.name}: {exc}") from exc
+        deadline = time.time() + wait
+        while time.time() < deadline:
+            time.sleep(poll)
+            self._by_tail = None
+            new = self.item_id(new_file)
+            if new and new != orig:
+                _request(f"{self.url}/Videos/MergeVersions?ids={orig},{new}", self.key, method="POST")
+                return "added as a second version of the film"
+        return f"Jellyfin has not picked up {new_file.name} yet; merge it with the film by hand"

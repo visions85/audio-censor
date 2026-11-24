@@ -62,12 +62,11 @@ def tesseract_language(lang: str) -> str:
 def pick_image_stream(info: MediaInfo, languages: list[str]) -> Stream | None:
     """The image subtitle track to read: a full (not forced) track in a wanted language,
     preferring a plain one over SDH (fewer sound cues, same dialogue)."""
-    subs = [s for s in info.of_type("subtitle") if s.codec_name in IMAGE_SUB_CODECS]
-    title = lambda s: (s.title or "").lower()
-    full = [s for s in subs if "forced" not in title(s)]
+    from .subtitles import is_dialogue_track
+    full = [s for s in info.of_type("subtitle") if s.codec_name in IMAGE_SUB_CODECS and is_dialogue_track(s)]
     wanted = [s for s in full if language_matches(s.language, languages)]
     for group in (wanted, full):
-        plain = [s for s in group if "sdh" not in title(s) and "commentary" not in title(s)]
+        plain = [s for s in group if "sdh" not in (s.title or "").lower()]
         if plain:
             return plain[0]
         if group:

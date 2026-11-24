@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import argparse
 import contextlib
+import glob
 import os
 import shutil
 import signal
@@ -14,10 +15,10 @@ import time
 from importlib import resources
 from pathlib import Path
 
-from . import __version__, asr, staging, thrash
+from . import __version__, asr, edition, scenes, staging, thrash
 from .beep import BeepError, BeepSpec, WAVES
 from .config import default_config_path, load_config, write_template
-from .media import VIDEO_EXTS, MediaError, eprint, language_matches, pick_audio_stream, probe
+from .media import VIDEO_EXTS, MediaError, eprint, language_matches, pick_audio_stream, probe, run
 from .names import NameDetector
 from .jellyfin import Jellyfin, JellyfinError
 from .plex import ORDERS, PlexError, PlexRatings
@@ -249,6 +250,9 @@ def _plex_select(media: Path, out: Path | None, cfg: dict, args, wait: float = 9
     if jf is not None:
         try:
             eprint(f"  jellyfin: {jf.refresh_clean(media, out, wait=wait)}")
+            if scenes.load(media).get("scenes"):
+                # the refresh cleared the film's skip segments; the scan puts them back
+                eprint(f"  jellyfin: skip scenes: {jf.start_segment_scan()}")
         except JellyfinError as exc:
             eprint(f"  jellyfin: could not refresh the film: {exc}")
             failed += 1
@@ -790,6 +794,111 @@ def cmd_plex_select(args, cfg) -> int:
     return 1 if failed else 0
 
 
+def cmd_skip(args, cfg) -> int:
+    """Mark scenes to skip: "Skip" chapters in the film, which Jellyfin turns into segments."""
+    media = Path(args.file).expanduser()
+    info = probe(media)
+    doc = scenes.load(media)
+    current = [(float(s), float(e), n) for s, e, n in doc.get("scenes", [])]
+    if args.clear:
+        current = []
+    for i in sorted(set(args.remove or []), reverse=True):
+        if not 1 <= i <= len(current):
+            raise UserError(f"no scene {i} (have 1..{len(current)})")
+        current.pop(i - 1)
+    for r in args.ranges:
+        try:
+            s, e = scenes.parse_range(r)
+        except ValueError as exc:
+            raise UserError(str(exc))
+        if e > info.duration + 1:
+            raise UserError(f"{r} goes past the end of the film ({scenes.fmt_time(info.duration)})")
+        current.append((s, e, args.note or ""))
+    changed = bool(args.ranges or args.remove or args.clear)
+    if changed:
+        try:
+            scenes.apply(media, current, info.duration)
+        except MediaError as exc:
+            raise UserError(str(exc))
+    current.sort()
+    print(f"{media.name}: {len(current)} scene(s) to skip" + (" (chapters updated)" if changed else ""))
+    for i, (s, e, note) in enumerate(current, 1):
+        print(f"  {i}. {scenes.fmt_time(s)} - {scenes.fmt_time(e)}  ({e - s:.1f} s){'  ' + note if note else ''}")
+    jf = _jellyfin(cfg) if not args.no_media_update else None
+    if jf is not None:
+        try:
+            if changed:
+                expected = len(scenes.merge_overlaps([(s, e) for s, e, _ in current]))
+                eprint(f"  jellyfin: {jf.refresh_skips(media, expected)}")
+            else:
+                eprint(f"  jellyfin: {jf.skip_status(media)}")
+        except JellyfinError as exc:
+            eprint(f"  jellyfin: {exc}")
+    return 0
+
+
+def cmd_edition(args, cfg) -> int:
+    """Re-encode a family edition with the film's skip scenes cut out (see edition.py)."""
+    media = Path(args.file).expanduser()
+    if media.is_dir():
+        media = max((p for p in media.iterdir() if p.suffix.lower() in VIDEO_EXTS and "{edition-" not in p.name),
+                    key=lambda p: p.stat().st_size)
+    info = probe(media)
+    doc = scenes.load(media)
+    ranges = [(float(s), float(e)) for s, e, _ in doc.get("scenes", [])]
+    if not ranges:
+        raise UserError(f"{media.name} has no scenes to cut; mark them first with 'audio-censor skip'")
+    if edition.has_dolby_vision(media):
+        raise UserError("this film has Dolby Vision; editions of Dolby Vision films are not supported yet")
+    cut = edition.plan_cut(ranges, info.duration)
+    out = edition.output_path(media, args.name)
+    if out.exists() and not args.overwrite:
+        raise UserError(f"{out.name} already exists (--overwrite to redo)")
+    eprint(f"{media.name}: cutting {len(cut.removed)} scene(s), {cut.removed_seconds:.1f} s, "
+           f"-> {out.name} (NVENC HEVC 10-bit, cq {args.cq})")
+    root = staging.stage_dir(cfg, args) or Path(tempfile.gettempdir())
+    with tempfile.TemporaryDirectory(prefix="audio-censor-edition-", dir=root) as tmp:
+        work = Path(tmp)
+        subs = None
+        src_subs = sorted(media.parent.glob(f"{glob.escape(media.stem)}.*.clean.srt"))
+        if src_subs:
+            subs = work / "clean.srt"
+            n = edition.shift_subtitles(src_subs[0], subs, cut)
+            eprint(f"  subtitles: {n} clean cue(s) kept from {src_subs[0].name}")
+        local = work / out.name
+        cmd = edition.build_command(media, info, cut, local, subs, args.cq)
+        if args.verbose:
+            eprint("  " + " ".join(cmd))
+        run(cmd, quiet=False)
+        edition.verify(local, info.duration - cut.removed_seconds)
+        chapters = edition.shift_chapters(
+            [scenes.Chapter(float(s), t) for s, t in doc.get("original_chapters", [])], cut)
+        if chapters:
+            xml = work / "chapters.xml"
+            xml.write_text(scenes.chapters_xml(chapters), encoding="utf-8")
+            run(["mkvpropedit", "-q", str(local), "--chapters", str(xml)])
+        eprint(f"  copying the edition to {out.parent} ...")
+        staging._copy(local, out)
+    scenes.restore_chapters(media, f"cut out in {out.name}")
+    eprint(f"  original: skip chapters removed, its own chapters restored")
+    plex = _plex(cfg, args)
+    if plex is not None:
+        try:
+            info_new = plex._scan_for(out, out, time.time() + 120, 10.0)
+            eprint("  plex: " + ("the edition is in the library" if info_new else
+                                 "scan requested; the edition appears once Plex has scanned the folder"))
+        except PlexError as exc:
+            eprint(f"  plex: {exc}")
+    jf = _jellyfin(cfg)
+    if jf is not None:
+        try:
+            eprint(f"  jellyfin: {jf.add_version(media, out)}")
+        except JellyfinError as exc:
+            eprint(f"  jellyfin: {exc}")
+    print(f"wrote {out}")
+    return 0
+
+
 def cmd_review(args, cfg) -> int:
     for media in expand_inputs(args.files, args.recursive):
         side = sidecar_path(media)
@@ -1068,6 +1177,22 @@ def build_parser() -> argparse.ArgumentParser:
                     help="how long to wait for the servers to notice the clean track (default 90)")
     sp.set_defaults(func=cmd_plex_select)
 
+    sp = sub.add_parser("skip", help="mark scenes for Jellyfin to skip (as \"Skip\" chapters; no remux)")
+    sp.add_argument("file", metavar="FILE")
+    sp.add_argument("ranges", nargs="*", metavar="START-END", help="scene to skip, e.g. 1:02:03-1:02:40")
+    sp.add_argument("--note", help="what the scene is, for your own reference")
+    sp.add_argument("--remove", type=int, action="append", metavar="N", help="remove scene N (see the list)")
+    sp.add_argument("--clear", action="store_true", help="remove all scenes and restore the original chapters")
+    sp.add_argument("--no-media-update", action="store_true", help="do not refresh Jellyfin")
+    sp.set_defaults(func=cmd_skip)
+
+    sp = sub.add_parser("edition", help="re-encode a family edition with the skip scenes cut out (GPU)")
+    sp.add_argument("file", metavar="FILE")
+    sp.add_argument("--name", default="Family", help="edition name (default Family)")
+    sp.add_argument("--cq", type=int, default=edition.DEFAULT_CQ, help="NVENC quality, lower is better (default 22)")
+    sp.add_argument("--overwrite", action="store_true")
+    sp.set_defaults(func=cmd_edition)
+
     sp = sub.add_parser("review", help="print the spans recorded for a file")
     add_input_arg(sp)
     sp.set_defaults(func=cmd_review)
@@ -1103,7 +1228,7 @@ def main(argv: list[str] | None = None) -> int:
         cfg = apply_overrides(cfg, args)
         # SIGTERM unwinds like Ctrl-C, so staging cleanup and the thrash guard still run.
         signal.signal(signal.SIGTERM, lambda signum, frame: sys.exit(143))
-        heavy = args.func in (cmd_process, cmd_scan, cmd_render) and not getattr(args, "dry_run", False)
+        heavy = args.func in (cmd_process, cmd_scan, cmd_render, cmd_edition) and not getattr(args, "dry_run", False)
         with thrash.relaxed(heavy and bool(cfg.get("system", {}).get("relax_thrash_guard", False))):
             return args.func(args, cfg)
     except (MediaError, BeepError, UserError, FileNotFoundError, FileExistsError, RuntimeError, ValueError) as exc:

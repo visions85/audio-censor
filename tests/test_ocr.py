@@ -159,3 +159,16 @@ def test_ocr_reads_a_rendered_caption(tmp_path):
     start, end, text = cues[0]
     assert (start, end) == (4.0, 6.0)
     assert "pillows" in text.lower()
+
+
+
+def test_pick_image_stream_skips_trivia_and_commentary_tracks():
+    info = MediaInfo(Path("elf.mkv"), 10.0, [
+        _stream(0, "hdmv_pgs_subtitle", "eng", "English (SDH)"),
+        _stream(1, "hdmv_pgs_subtitle", "fre", "French"),
+        _stream(4, "hdmv_pgs_subtitle", "eng", "English (Trivia)"),
+        _stream(5, "hdmv_pgs_subtitle", "eng", "Commentary by the director"),
+    ])
+    assert ocr.pick_image_stream(info, ["eng", "en"]).type_index == 0
+    info.streams = info.streams[2:]                     # only specialty tracks left
+    assert ocr.pick_image_stream(info, ["eng"]) is None

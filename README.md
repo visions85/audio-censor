@@ -251,6 +251,35 @@ default flag, so it plays the clean track once it has re-read the file. With
 waits until it lists the clean track as default. A Jellyfin user with "remember audio
 selections" on who already picked another track keeps that choice.
 
+## Skipping scenes in Jellyfin
+
+Audio and subtitles can be cleaned; pictures cannot. For a scene that should not be
+seen at all, `skip` marks it for Jellyfin players to jump over, without touching the
+video:
+
+```bash
+audio-censor skip Movie.mkv 1:02:03-1:02:40 --note "pool scene"   # add a scene
+audio-censor skip Movie.mkv                                       # list scenes; Jellyfin status
+audio-censor skip Movie.mkv --remove 1                            # or --clear for all
+```
+
+Each scene becomes a chapter named "Skip" (and the interrupted chapter resumes after
+it); `mkvpropedit` rewrites the chapter list in place, so there is no remux. The
+original chapters are kept in `Movie.skip.json` and later renders keep the scenes.
+
+One-time Jellyfin setup:
+
+1. Install the **Chapter Segments Provider** plugin (Dashboard -> Plugins -> Catalog) and
+   restart Jellyfin.
+2. In its settings set the **Commercial** mapping to `^Skip$`. Its default
+   (`break|ad|...`, unanchored) also matches ordinary chapter names such as "The Road".
+3. In each Jellyfin app: Settings -> Playback -> Media Segments -> Commercial: **Skip**.
+
+Jellyfin builds segments only in its library-wide "Media Segment Scan" task (minutes on a
+big library), which `skip` starts; run `skip Movie.mkv` later to see them. A refresh of
+the film clears its segments until that scan runs again, so renders of a film with
+scenes start the scan too. Plex shows the extra "Skip" chapter but cannot skip it.
+
 ## Configuration
 
 `audio-censor init-config` writes `~/.config/audio-censor/config.toml`. Every key is

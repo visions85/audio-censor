@@ -73,3 +73,39 @@ def test_falls_back_to_search_when_the_listing_misses_the_film(server):
     server["search"] = [{"Id": "h1", "Path": hidden}, {"Id": "h2", "Path": "/movies/Home Alone 2/x.mkv"}]
     j = Jellyfin("http://jf", "k3y")
     assert j.item_id(Path("/mnt/share/Home Alone (1990) {imdb-tt0099785}/Home Alone (1990).mkv")) == "h1"
+
+
+def test_add_version_announces_then_merges(monkeypatch):
+    calls = {"merged": None, "announced": None}
+    orig = "/movies/Film (1989)/Film.1989.Remux.mkv"
+    new = "/movies/Film (1989)/Film (1989) {edition-Family}.mkv"
+    state = {"listed": False}
+
+    def fake(url, key, method="GET", timeout=30.0):
+        if method == "POST" and "MergeVersions" in url:
+            calls["merged"] = url.split("ids=")[1]
+            return {}
+        if "Ids=o1" in url:
+            return {"Items": [{"Id": "o1", "Path": orig, "MediaSources": [{"Path": orig}]}]}
+        if "IncludeItemTypes" in url:
+            items = [{"Id": "o1", "Path": orig}] + ([{"Id": "n2", "Path": new}] if state["listed"] else [])
+            return {"Items": items}
+        raise AssertionError(url)
+
+    class Resp:
+        def read(self):
+            return b""
+
+    def fake_urlopen(req, timeout=30):
+        calls["announced"] = json.loads(req.data)["Updates"][0]["Path"]
+        state["listed"] = True
+        return Resp()
+
+    import json
+    monkeypatch.setattr(jf, "_request", fake)
+    monkeypatch.setattr(jf.urllib.request, "urlopen", fake_urlopen)
+    monkeypatch.setattr(jf.time, "sleep", lambda s: None)
+    j = Jellyfin("http://jf", "k3y")
+    msg = j.add_version(Path("/mnt/x/Film (1989)/Film.1989.Remux.mkv"), Path("/mnt/x/Film (1989)/Film (1989) {edition-Family}.mkv"))
+    assert msg == "added as a second version of the film"
+    assert calls["announced"] == new and calls["merged"] == "o1,n2"

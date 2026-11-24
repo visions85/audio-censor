@@ -61,18 +61,22 @@ def _ours(stream: Stream) -> bool:
     return (stream.title or "").strip().lower() == CLEAN_TAG
 
 
+# Subtitle tracks that are not the film's dialogue: Blu-ray trivia/pop-up tracks,
+# commentary transcripts, signs-and-songs, forced (foreign lines only), descriptions.
+_NOT_DIALOGUE = re.compile(r"forced|trivia|pop-?up|facts?\b|commentary|signs|songs|karaoke|"
+                           r"descriptive|audio description|lyrics|director|producer", re.I)
+
+
+def is_dialogue_track(stream: Stream) -> bool:
+    return not _ours(stream) and not _NOT_DIALOGUE.search(stream.title or "")
+
+
 def pick_embedded(info: MediaInfo, languages: list[str]) -> Stream | None:
-    subs = [s for s in info.of_type("subtitle") if s.codec_name in TEXT_SUB_CODECS and not _ours(s)]
-    if not subs:
-        return None
-    is_forced = lambda s: "forced" in (s.title or "").lower()
+    subs = [s for s in info.of_type("subtitle") if s.codec_name in TEXT_SUB_CODECS and is_dialogue_track(s)]
     for s in subs:
-        if language_matches(s.language, languages) and not is_forced(s):
+        if language_matches(s.language, languages):
             return s
-    for s in subs:
-        if not is_forced(s):
-            return s
-    return None
+    return subs[0] if subs else None
 
 
 @dataclass
