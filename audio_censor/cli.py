@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import argparse
+import contextlib
 import os
 import shutil
 import subprocess
@@ -12,11 +13,12 @@ import time
 from importlib import resources
 from pathlib import Path
 
-from . import __version__, asr
+from . import __version__, asr, staging
 from .beep import BeepError, BeepSpec, WAVES
 from .config import default_config_path, load_config, write_template
 from .media import VIDEO_EXTS, MediaError, eprint, language_matches, pick_audio_stream, probe
 from .names import NameDetector
+from .jellyfin import Jellyfin, JellyfinError
 from .plex import ORDERS, PlexError, PlexRatings
 from .ratings import find_rating, should_skip
 from .render import (check_disk_space, default_output, finalize_in_place, is_clean_track, remux_with_subtitles,
@@ -77,6 +79,8 @@ def apply_overrides(cfg: dict, args: argparse.Namespace) -> dict:
         cfg["beep"]["duck"] = args.duck
         if not g("mode") and cfg["beep"]["mode"] == "mute":
             cfg["beep"]["mode"] = "duck"
+    if g("duck_channels"):
+        cfg["beep"]["duck_channels"] = args.duck_channels
     if g("in_place"):
         cfg["output"]["in_place"] = True
     if g("backup"):
@@ -110,8 +114,13 @@ def apply_overrides(cfg: dict, args: argparse.Namespace) -> dict:
     return cfg
 
 
-def scan_file(media: Path, cfg: dict, args: argparse.Namespace, position: str = "") -> tuple[list[Span], dict]:
-    """Run subtitle + ASR scans and return merged spans plus metadata."""
+def scan_file(media: Path, cfg: dict, args: argparse.Namespace, position: str = "",
+              origin: Path | None = None) -> tuple[list[Span], dict]:
+    """Run subtitle + ASR scans and return merged spans plus metadata.
+
+    `origin` is the film's real location when `media` is a staged local copy; ratings
+    (NFO files up the tree, Plex) are looked up there.
+    """
     info = probe(media)
     dialogue = pick_audio_stream(info, cfg["languages"], getattr(args, "audio_track", None))
     matcher = Matcher.from_config(cfg)
@@ -119,7 +128,7 @@ def scan_file(media: Path, cfg: dict, args: argparse.Namespace, position: str = 
     scan_cfg = cfg["scan"]
     eprint(f"{position}{media.name}: {info.duration / 60:.1f} min, dialogue track {dialogue.describe()}")
 
-    rating, rating_src = find_rating(media, info.tags, _plex_lookup(cfg, args))
+    rating, rating_src = find_rating(origin or media, info.tags, _plex_lookup(cfg, args))
     if rating and should_skip(rating, scan_cfg.get("skip_ratings", [])) and not getattr(args, "ignore_rating", False):
         eprint(f"  rated {rating} ({rating_src}); skipping")
         return [], {"audio_track": dialogue.type_index, "level": cfg["level"], "duration": round(info.duration, 3),
@@ -147,7 +156,8 @@ def scan_file(media: Path, cfg: dict, args: argparse.Namespace, position: str = 
 
         if scan_cfg["use_subtitles"]:
             explicit = Path(args.subtitles).expanduser() if getattr(args, "subtitles", None) else None
-            src = find_subtitle_source(media, info, cfg["languages"], work, explicit, _ignore_tags(cfg))
+            src = find_subtitle_source(media, info, cfg["languages"], work, explicit, _ignore_tags(cfg),
+                                       **_ocr_opts(cfg, args))
             cues = load_cues(src.path) if src else []
             sub_source = src.description if src else "no subtitles found"
             if cues:
@@ -208,6 +218,40 @@ def _plex(cfg: dict, args) -> PlexRatings | None:
     return _PLEX["server"]
 
 
+def _jellyfin(cfg: dict) -> Jellyfin | None:
+    if "jellyfin" not in _PLEX:
+        try:
+            _PLEX["jellyfin"] = Jellyfin.from_config(cfg)
+        except JellyfinError as exc:
+            eprint(f"  jellyfin: {exc}")
+            _PLEX["jellyfin"] = None
+    return _PLEX["jellyfin"]
+
+
+def _plex_select(media: Path, out: Path | None, cfg: dict, args, wait: float = 90.0) -> int:
+    """After a render, have the media servers play the clean track: Plex gets it selected
+    (it remembers past choices), Jellyfin gets the film refreshed (it follows the default
+    flag once it has re-read the file). Returns the number of servers that failed."""
+    if out is None or getattr(args, "dry_run", False) or getattr(args, "no_plex_select", False):
+        return 0
+    failed = 0
+    plex = _plex(cfg, args) if cfg.get("plex", {}).get("select_clean", True) else None
+    if plex is not None:
+        try:
+            eprint(f"  plex: {plex.select_clean_audio(media, out, wait=wait)}")
+        except PlexError as exc:
+            eprint(f"  plex: could not select the clean track: {exc}")
+            failed += 1
+    jf = _jellyfin(cfg) if cfg.get("jellyfin", {}).get("refresh", True) else None
+    if jf is not None:
+        try:
+            eprint(f"  jellyfin: {jf.refresh_clean(media, out, wait=wait)}")
+        except JellyfinError as exc:
+            eprint(f"  jellyfin: could not refresh the film: {exc}")
+            failed += 1
+    return failed
+
+
 def order_files(files: list[Path], cfg: dict, args) -> list[Path]:
     """--order rating|added|watched sorts a batch with Plex's data; name is plain path order."""
     by = getattr(args, "order", None) or "name"
@@ -260,6 +304,39 @@ def decide_audio_language(media: Path, info, dialogue, cfg: dict, args, work: Pa
             lang = (scan.get("assume_untagged") or "").lower()
             how = "untagged, assumed" if lang else "untagged"
     return language_matches(lang, cfg["languages"]), lang, how
+
+
+def _ocr_opts(cfg: dict, args=None) -> dict:
+    """Whether to OCR image subtitles when no text subtitles exist, and whether to reuse <file>.ocr.json."""
+    scan = cfg["scan"]
+    enabled = scan.get("ocr_subtitles", True) and not getattr(args, "no_ocr", False)
+    cache = scan.get("cache_transcript", True) and not getattr(args, "rescan", False)
+    return {"ocr": enabled, "ocr_cache": cache}
+
+
+def _stage(media: Path, cfg: dict, args, copies: int):
+    """Stage `media` on the local disk if configured (see staging.py), else use it where it is."""
+    if staging.stage_dir(cfg, args) is None or _skips_by_rating(media, cfg, args):
+        return contextlib.nullcontext(staging.Staged(media, media))
+    return staging.staged(media, cfg, args, copies)
+
+
+def _skips_by_rating(media: Path, cfg: dict, args) -> bool:
+    """Would the scan skip this film for its rating? Checked before copying 50 GB for nothing."""
+    if getattr(args, "ignore_rating", False):
+        return False
+    try:
+        rating, _ = find_rating(media, probe(media).tags, _plex_lookup(cfg, args))
+    except MediaError:
+        return False
+    return bool(rating) and should_skip(rating, cfg["scan"].get("skip_ratings", []))
+
+
+def _real(path: Path | None, st: "staging.Staged") -> Path | None:
+    """Where a file written beside a staged copy ends up once copied back."""
+    if path is not None and st.staged and path.parent == st.local.parent:
+        return st.origin.parent / path.name
+    return path
 
 
 def _ignore_tags(cfg: dict) -> tuple[str, ...]:
@@ -327,7 +404,8 @@ def render_subtitles_only(media: Path, cfg: dict, args, meta: dict) -> tuple[Pat
     with tempfile.TemporaryDirectory(prefix="audio-censor-") as tmp:
         work = Path(tmp)
         explicit = Path(args.subtitles).expanduser() if getattr(args, "subtitles", None) else None
-        src = find_subtitle_source(media, info, cfg["languages"], work, explicit, _ignore_tags(cfg))
+        src = find_subtitle_source(media, info, cfg["languages"], work, explicit, _ignore_tags(cfg),
+                                       **_ocr_opts(cfg, args))
         if src is None:
             eprint("  clean subtitles: no subtitles found, nothing to do")
             return None, "nothing"
@@ -429,7 +507,8 @@ def prepare_clean_subtitles(media: Path, info, cfg: dict, args, output: Path, wo
     if not sub_cfg.get("clean", True) or not (sub_cfg.get("sidecar", True) or sub_cfg.get("embed", True)):
         return None, ""
     explicit = Path(args.subtitles).expanduser() if getattr(args, "subtitles", None) else None
-    src = find_subtitle_source(media, info, cfg["languages"], work, explicit, _ignore_tags(cfg))
+    src = find_subtitle_source(media, info, cfg["languages"], work, explicit, _ignore_tags(cfg),
+                                       **_ocr_opts(cfg, args))
     if src is None:
         eprint("  clean subtitles: no subtitles found, skipping")
         return None, ""
@@ -495,8 +574,9 @@ def cmd_scan(args, cfg) -> int:
                        "--overwrite to redo")
                 counts["already scanned"] += 1
                 continue
-            spans, meta = scan_file(media, cfg, args, pos)
-            save_sidecar(side, media, spans, meta)
+            with _stage(media, cfg, args, copies=1) as st:
+                spans, meta = scan_file(st.local, cfg, args, pos, origin=media)
+                save_sidecar(sidecar_path(st.local), st.local, spans, meta)
             if meta.get("skipped"):
                 print(f"{media.name}: {meta['skipped']}, skipped -> {side.name}")
                 counts["skipped (rating)"] += 1
@@ -560,6 +640,7 @@ def cmd_render(args, cfg) -> int:
             else:
                 out = render_file(media, spans, cfg, args, track)
                 counts["rendered" if spans else "clean already"] += 1
+                _plex_select(media, out, cfg, args)
             if out and not args.dry_run:
                 print(f"wrote {out}")
         except Exception as exc:  # noqa: BLE001 - see _batch_guard
@@ -623,18 +704,25 @@ def cmd_process(args, cfg) -> int:
                        + ", skipping (--overwrite to redo)")
                 counts["skipped"] += 1
                 continue
-            spans, meta = scan_file(media, cfg, args, pos)
-            save_sidecar(sidecar_path(media), media, spans, meta)
-            if meta.get("skipped"):
-                counts["skipped (rating)"] += 1
-                out = None
-            elif not meta.get("audio_censored", True):
-                out, status = render_subtitles_only(media, cfg, args, meta)
-                counts[{"written": "subtitles only", "skipped": "skipped", "nothing": "clean already"}[status]] += 1
-            else:
-                print(format_table(spans))
-                out = render_file(media, spans, cfg, args, meta["audio_track"])
-                counts["censored" if spans else "clean already"] += 1
+            copies = 2 + bool(in_place(cfg) and cfg["output"].get("backup"))
+            audio_out = None
+            with _stage(media, cfg, args, copies) as st:
+                spans, meta = scan_file(st.local, cfg, args, pos, origin=media)
+                save_sidecar(sidecar_path(st.local), st.local, spans, meta)
+                if meta.get("skipped"):
+                    counts["skipped (rating)"] += 1
+                    out = None
+                elif not meta.get("audio_censored", True):
+                    out, status = render_subtitles_only(st.local, cfg, args, meta)
+                    counts[{"written": "subtitles only", "skipped": "skipped", "nothing": "clean already"}[status]] += 1
+                else:
+                    print(format_table(spans))
+                    out = render_file(st.local, spans, cfg, args, meta["audio_track"])
+                    counts["censored" if spans else "clean already"] += 1
+                    audio_out = out
+            out = _real(out, st)
+            if audio_out is not None:
+                _plex_select(media, _real(audio_out, st), cfg, args)
             if out and not args.dry_run:
                 print(f"wrote {out}")
         except Exception as exc:  # noqa: BLE001 - see _batch_guard
@@ -643,6 +731,23 @@ def cmd_process(args, cfg) -> int:
             eprint("")
     _summary(files, counts, args)
     return 1 if counts["failed"] else 0
+
+
+def cmd_plex_select(args, cfg) -> int:
+    """Have Plex and Jellyfin play the clean track of files that already have one."""
+    if _plex(cfg, args) is None and _jellyfin(cfg) is None:
+        raise UserError("media-select needs a media server: set [plex] url/token or [jellyfin] url/api_key")
+    failed = 0
+    for media in expand_inputs(args.files, args.recursive):
+        target = media if in_place(cfg) else resolve_output(media, cfg, args)
+        if not target.exists():
+            target = media
+        if not any(is_clean_track(a) for a in probe(target).of_type("audio")):
+            eprint(f"{media.name}: no clean track, skipping")
+            continue
+        eprint(f"{media.name}:")
+        failed += _plex_select(media, target, cfg, args, wait=args.wait)
+    return 1 if failed else 0
 
 
 def cmd_review(args, cfg) -> int:
@@ -745,7 +850,8 @@ def cmd_play(args, cfg) -> int:
         if cfg["subtitles"].get("clean", True) and not args.no_subs:
             explicit = Path(args.subtitles).expanduser() if args.subtitles else None
             info = probe(media)
-            src = find_subtitle_source(media, info, cfg["languages"], work, explicit, _ignore_tags(cfg))
+            src = find_subtitle_source(media, info, cfg["languages"], work, explicit, _ignore_tags(cfg),
+                                       **_ocr_opts(cfg, args))
             if src is not None:
                 target = work / f"{media.stem}.{src.language or 'und'}.clean{src.path.suffix}"
                 n = write_clean_subtitles(src, Matcher.from_config(cfg), target, cfg["subtitles"].get("style", "asterisks"),
@@ -788,11 +894,16 @@ def add_scan_options(p: argparse.ArgumentParser) -> None:
     g.add_argument("--level", choices=TIERS, help="strictness: strong < moderate < mild (mild censors most)")
     g.add_argument("--no-asr", action="store_true", help="skip speech recognition")
     g.add_argument("--no-subtitles", action="store_true", help="skip subtitle scanning")
+    g.add_argument("--no-ocr", action="store_true", help="do not OCR image (PGS) subtitles")
     g.add_argument("--subtitles", metavar="FILE", help="use this subtitle file instead of auto-detecting")
     g.add_argument("--audio-track", type=int, metavar="N", help="audio track to scan/censor (see 'info')")
     g.add_argument("--model", help="whisper model (tiny, base, small, medium, large-v3, ...)")
     g.add_argument("--device", choices=["auto", "cpu", "cuda"], help="whisper device")
-    g.add_argument("--rescan", action="store_true", help="ignore a cached transcript")
+    g.add_argument("--rescan", action="store_true", help="ignore a cached transcript and OCR result")
+    s = p.add_argument_group("staging")
+    s.add_argument("--stage-dir", metavar="DIR",
+                   help="copy films on network shares here, work locally, copy results back")
+    s.add_argument("--no-stage", action="store_true", help="work on files where they are, even if [staging] dir is set")
     g.add_argument("--no-names", action="store_true", help="censor Dick even when it is a character's name")
     g.add_argument("--any-language", action="store_true", help="censor audio whatever language it is in")
     g.add_argument("--ignore-rating", action="store_true", help="scan even films rated G / TV-Y / TV-G")
@@ -811,6 +922,8 @@ def add_render_options(p: argparse.ArgumentParser) -> None:
     g.add_argument("--beep-file", metavar="SOUND", help="custom sound file (sets --wave file)")
     g.add_argument("--beep-channel", choices=["center", "all"])
     g.add_argument("--duck", type=float, metavar="LEVEL", help="residual dialogue level under the beep (0..1)")
+    g.add_argument("--duck-channels", choices=["center", "all"],
+                   help="lower only the centre (dialogue) channel of a surround track, or every channel")
     c = p.add_argument_group("clean subtitles")
     c.add_argument("--no-clean-subs", action="store_true", help="do not write censored subtitles")
     c.add_argument("--sub-style", choices=STYLES, help="how masked words look (default asterisks)")
@@ -828,6 +941,8 @@ def add_render_options(p: argparse.ArgumentParser) -> None:
     o.add_argument("--backup", action="store_true", help="with --in-place, keep the original as Movie.orig.mkv")
     o.add_argument("--replace-audio", action="store_true", help="drop the original audio tracks")
     o.add_argument("--no-default", action="store_true", help="do not mark the clean track as default")
+    o.add_argument("--no-media-update", "--no-plex-select", dest="no_plex_select", action="store_true",
+                   help="do not update Plex/Jellyfin after rendering ([plex] select_clean, [jellyfin] refresh)")
     o.add_argument("--overwrite", action="store_true")
     o.add_argument("--force", action="store_true", help="remux even when nothing was found")
     o.add_argument("--dry-run", action="store_true", help="print the ffmpeg command and stop")
@@ -904,6 +1019,14 @@ def build_parser() -> argparse.ArgumentParser:
     add_input_arg(sp)
     sp.add_argument("--output-dir", metavar="DIR", help="where rendered files live, if not beside the originals")
     sp.set_defaults(func=cmd_status)
+
+    sp = sub.add_parser("media-select", aliases=["plex-select"],
+                        help="make Plex and Jellyfin play the clean track of already-rendered files")
+    add_input_arg(sp)
+    sp.add_argument("--output-dir", metavar="DIR", help="where rendered files live, if not beside the originals")
+    sp.add_argument("--wait", type=float, default=90.0, metavar="SECONDS",
+                    help="how long to wait for the servers to notice the clean track (default 90)")
+    sp.set_defaults(func=cmd_plex_select)
 
     sp = sub.add_parser("review", help="print the spans recorded for a file")
     add_input_arg(sp)

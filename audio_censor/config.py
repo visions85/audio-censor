@@ -35,7 +35,8 @@ DEFAULTS: dict = {
             "dick": ["dic", "dyk"], "tits": ["tit's"], "whore": ["hoar", "hoare"],
         },
         "asr_only": True,              # keep ASR hits that no subtitle confirms
-        "cache_transcript": True,      # save <file>.transcript.json so re-scans skip ASR
+        "cache_transcript": True,      # save <file>.transcript.json (and .ocr.json) so re-scans skip ASR/OCR
+        "ocr_subtitles": True,         # read image (Blu-ray PGS) subtitles by OCR when there are no text ones
         "treat_asterisks_as_hit": True,
     },
     "asr": {
@@ -50,6 +51,8 @@ DEFAULTS: dict = {
     "beep": {
         "mode": "duck",                # duck (lower the dialogue) | mute | beep
         "duck": 0.1,                   # dialogue level inside a span: 0.1 = -20 dB; also under a beep
+        "duck_channels": "center",     # center: duck only the dialogue channel of a 5.1/7.1 track, so
+                                       # music keeps playing (stereo has no such channel: all) | all
         "wave": "sine",                # beep mode: sine | square | triangle | sawtooth | noise | file
         "frequency": 1000,
         "volume": 0.4,                 # beep level, linear 0..1 or a string like "-8dB"
@@ -79,10 +82,22 @@ DEFAULTS: dict = {
         "standalone": "sidecar",       # non-English audio: sidecar (<file>.<lang>.clean.srt) | remux | skip
         "standalone_suffix": ".clean",
     },
+    "staging": {
+        "dir": "",                     # local folder to copy films into while working on them ("" = off)
+        "mode": "network",             # network (only films on NFS/SMB shares) | always | never
+    },
     "plex": {
         "url": "",                     # e.g. "https://plex.example.com:32400"; or env PLEX_URL
         "token": "",                   # X-Plex-Token; prefer env PLEX_TOKEN over writing it here
         "path_map": {},                # {"/media/movies": "/data/movies"} when Plex sees other paths
+        "select_clean": True,          # after a render, make Plex play the clean track (it remembers the
+                                       # last track chosen per film, which beats the file's default flag)
+    },
+    "jellyfin": {
+        "url": "",                     # e.g. "http://unraid:8096"; or env JELLYFIN_URL
+        "api_key": "",                 # Dashboard -> API Keys; or env JELLYFIN_API_KEY
+        "path_map": {},                # {"/mnt/media/movies": "/movies"} when Jellyfin sees other paths
+        "refresh": True,               # after a render, refresh the film so Jellyfin sees the clean track
     },
     "names": {
         "detect": True,                # treat capitalized mid-sentence uses (Dick, Fagin) as names
@@ -154,6 +169,12 @@ embed = true                # also add a "Clean" subtitle track inside the file
 set_default = false
 standalone = "sidecar"      # foreign-language audio: sidecar | remux | skip
 standalone_suffix = ".clean"
+
+[staging]
+# Copy a film on a network share to a fast local disk, work on it there, then copy
+# the results back: one transfer each way instead of four. Needs room for two copies.
+# dir = "/mnt/fast/audio-censor"
+mode = "network"            # network | always | never
 
 [plex]
 # Ratings for the G-rated skip, when your library has no NFO files (Plex never writes them).

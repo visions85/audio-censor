@@ -9,7 +9,7 @@ from pathlib import Path
 
 import pysubs2
 
-from .media import MediaInfo, Stream, extract_subtitle, language_matches
+from .media import MediaError, MediaInfo, Stream, eprint, extract_subtitle, language_matches
 from .names import NameDetector
 from .spans import Hit
 from .wordlist import Matcher, tokenize
@@ -121,7 +121,8 @@ def _language_tag(media: Path, sub: Path, ignore_tags: tuple[str, ...] = (CLEAN_
 
 def find_subtitle_source(media: Path, info: MediaInfo, languages: list[str], workdir: Path,
                          explicit: Path | None = None,
-                         ignore_tags: tuple[str, ...] = (CLEAN_TAG,)) -> SubtitleSource | None:
+                         ignore_tags: tuple[str, ...] = (CLEAN_TAG,),
+                         ocr: bool = True, ocr_cache: bool = True) -> SubtitleSource | None:
     if explicit is not None:
         if not explicit.exists():
             raise FileNotFoundError(f"subtitle file not found: {explicit}")
@@ -134,7 +135,42 @@ def find_subtitle_source(media: Path, info: MediaInfo, languages: list[str], wor
         out = workdir / f"{media.stem}.s{stream.type_index}.srt"
         extract_subtitle(media, stream.type_index, out)
         return SubtitleSource(out, stream.language, f"embedded track {stream.describe()}", True)
+    if ocr:
+        return _ocr_source(media, info, languages, workdir, ocr_cache)
     return None
+
+
+def _ocr_source(media: Path, info: MediaInfo, languages: list[str], workdir: Path,
+                cache: bool) -> SubtitleSource | None:
+    """Fall back to reading an image (PGS) subtitle track by OCR."""
+    try:
+        from . import ocr
+    except ImportError:                     # numpy missing: OCR is an optional extra
+        return None
+    stream = ocr.pick_image_stream(info, languages)
+    if stream is None:
+        return None
+    cached = cache and ocr.load_cache(ocr.cache_path(media), stream) is not None
+    if not cached and not ocr.available():
+        eprint(f"  subtitles: only image subtitles here; {ocr.INSTALL_HINT}")
+        return None
+    if not cached:
+        eprint(f"  subtitles: reading image track {stream.describe()} by OCR ...")
+    try:
+        cues, from_cache = ocr.read_image_subtitles(media, stream, workdir, cache)
+    except MediaError as exc:
+        eprint(f"  subtitles: OCR failed: {exc}")
+        return None
+    if not cues:
+        return None
+    subs = pysubs2.SSAFile()
+    for start, end, text in cues:
+        subs.append(pysubs2.SSAEvent(start=int(start * 1000), end=int(end * 1000),
+                                     text=text.replace("\n", "\\N")))
+    out = workdir / f"{media.stem}.s{stream.type_index}.ocr.srt"
+    subs.save(str(out), encoding="utf-8")
+    how = "cached OCR" if from_cache else "OCR"
+    return SubtitleSource(out, stream.language, f"embedded track {stream.describe()} ({how})", True)
 
 
 def obtain_cues(media: Path, info: MediaInfo, languages: list[str], workdir: Path,

@@ -11,7 +11,8 @@ Detection combines two sources:
 
 - **Subtitles**: an external `.srt`/`.ass`/`.vtt` next to the file, or an embedded text
   subtitle track. Cheap, catches almost everything, but only knows roughly where in a
-  line the word falls.
+  line the word falls. When a film only has image subtitles (Blu-ray PGS), they are
+  read by OCR with [Tesseract](https://github.com/tesseract-ocr/tesseract).
 - **Speech recognition** (optional): [faster-whisper](https://github.com/SYSTRAN/faster-whisper)
   transcribes the dialogue with per-word timestamps, so each beep lands on the word
   itself. When both agree, the tighter ASR timing wins.
@@ -28,6 +29,11 @@ sudo dnf install python3-pip ffmpeg
 # Arch
 sudo pacman -S python-pip ffmpeg
 ```
+
+Optional, to read image (Blu-ray PGS) subtitles: Tesseract with its English data
+(`sudo apt install tesseract-ocr`, `sudo dnf install tesseract tesseract-langpack-eng`,
+`sudo pacman -S tesseract tesseract-data-eng`) and numpy (`pip install -e '.[ocr]'`;
+the `asr` extra already has it). Without them such films fall back to speech recognition alone.
 
 Then, from a checkout of this repository, install into a virtual environment
 (Debian and Ubuntu refuse a system-wide `pip install`):
@@ -95,6 +101,26 @@ titled "Clean". Choose the masking with `--sub-style`:
 
 `--no-clean-subs` turns it off; `[subtitles]` in the config picks sidecar, embedded or both.
 
+### Films on a network share: `[staging]`
+
+`process` reads a film three times (audio for Whisper, the subtitle track, the remux).
+Over NFS or SMB each read is a full transfer. With a local staging folder set, a film on
+a network share is copied there once, worked on locally, and only new or changed files
+(the clean file, the span file, caches, or the rewritten film with `--in-place`) are
+copied back beside the original before the local copy is deleted:
+
+```toml
+[staging]
+dir = "/mnt/fast/audio-censor"
+mode = "network"            # network shares only | always | never
+```
+
+`--stage-dir DIR` sets it for one run and `--no-stage` turns it off. A film needs room
+for itself and its clean copy; without it the run works over the network as before.
+Films skipped for their rating are never copied. If a run fails, the scan results and
+caches are still copied back and the local copy is kept, so a retry starts without
+fetching the film again.
+
 ### Scan now, remux later
 
 `process` does everything in one go, but the two halves also run separately, which is
@@ -113,7 +139,9 @@ audio-censor render -r /media/films    # phase two: remux from the span files
 Everything the remux step needs lives beside the film: `Movie.censor.json` holds the
 spans, the chosen audio track, the word level and the language decision, and
 `Movie.transcript.json` caches the Whisper output so a re-scan with a changed word list
-takes seconds. Both commands are resumable: `scan` leaves already-scanned files alone
+takes seconds. `Movie.ocr.json` does the same for OCR'd image subtitles (a name media
+servers do not take for a subtitle file, so the uncensored text never shows up as a track);
+`--rescan` redoes both, `--no-ocr` skips OCR. Both commands are resumable: `scan` leaves already-scanned files alone
 (`--overwrite` to redo), `render` skips files that are not scanned yet or already have
 their clean output, and both carry on past a broken file and print a summary.
 
@@ -185,6 +213,28 @@ parent folder plus filename when Plex sees the files under a different mount
 (`[plex.path_map]` handles that explicitly). Local NFOs take priority over Plex. Films
 with no rating anywhere are scanned normally. `--ignore-rating` overrides the skip.
 
+### Plex and Jellyfin play the clean track
+
+Plex remembers the last audio track chosen for each film, and that choice beats the
+file's default flag, so a film someone has watched before would keep starting on the
+original audio. With `[plex]` configured, every `process` and `render` therefore ends by
+refreshing the film in Plex, waiting (up to 90 s) until Plex lists the "Clean" track,
+and selecting it. The choice is stored for the Plex account whose token is configured;
+other users on the server pick it once themselves. `--no-plex-select` or
+`select_clean = false` under `[plex]` turns this off. For films Plex had not picked up
+yet, or ones rendered before this existed:
+
+```bash
+audio-censor media-select -r /media/films
+```
+
+Jellyfin chooses a film's audio by the user's preferred language and then the file's
+default flag, so it plays the clean track once it has re-read the file. With
+`[jellyfin]` configured (`url`, and an `api_key` from Dashboard -> API Keys, or
+`JELLYFIN_URL` / `JELLYFIN_API_KEY`), each render refreshes the film in Jellyfin and
+waits until it lists the clean track as default. A Jellyfin user with "remember audio
+selections" on who already picked another track keeps that choice.
+
 ## Configuration
 
 `audio-censor init-config` writes `~/.config/audio-censor/config.toml`. Every key is
@@ -196,6 +246,7 @@ level = "moderate"          # strong | moderate | mild   (mild censors the most)
 [beep]
 mode = "duck"               # duck | mute | beep
 duck = 0.1                  # dialogue level inside a span: 0.1 = -20 dB, 0.03 = -30 dB
+duck_channels = "center"    # 5.1/7.1: lower only the dialogue channel, music plays on; or "all"
 wave = "sine"               # beep mode: sine | square | triangle | sawtooth | noise | file
 frequency = 1000
 volume = 0.4                # linear 0..1, or "-8dB"
@@ -268,7 +319,10 @@ ffmpeg does all the audio work in one pass, so a two-hour film remuxes in about 
 time it takes to re-encode one audio track:
 
 1. The chosen dialogue track is ducked (default, to -20 dB), muted, or gated to silence
-   inside every span, at 5 ms resolution.
+   inside every span, at 5 ms resolution. On a 5.1 or 7.1 track only the centre channel,
+   where films put the dialogue, is lowered, so music and effects in the other channels
+   keep playing (`duck_channels = "all"` or `--duck-channels all` lowers everything).
+   Stereo tracks have no separate dialogue channel and are lowered as a whole.
 2. In beep mode one beep is synthesized per span, faded in and out, delayed to the span
    start, and for surround tracks placed in the center channel only, so music and
    effects in the other channels keep playing.

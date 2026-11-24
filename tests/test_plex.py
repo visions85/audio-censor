@@ -110,3 +110,61 @@ def test_order_requires_plex(tmp_path):
     with pytest.raises(UserError):
         order_files(files, DEFAULTS, argparse.Namespace(order="rating", refresh_plex=False))
     _PLEX.clear()
+
+
+def _item_with_streams(streams, file="/data/Movies/Heat (1995)/Heat (1995).mkv"):
+    return {"MediaContainer": {"Metadata": [{"ratingKey": "42", "title": "Heat", "Media": [
+        {"Part": [{"id": 900, "file": file, "Stream": streams}]}]}]}}
+
+
+ORIG = {"id": 1, "streamType": 2, "title": "5.1 Surround", "selected": True}
+CLEAN = {"id": 2, "streamType": 2, "title": "Clean (muted)", "default": True}
+
+
+@pytest.fixture
+def plex_api(monkeypatch, tmp_path):
+    """A fake Plex: the index, an item whose clean track appears after one refresh poll, and PUTs."""
+    movies = json.loads(json.dumps(MOVIES))
+    movies["MediaContainer"]["Metadata"][1]["ratingKey"] = "42"
+    state = {"polls": 0, "sent": [], "streams_after": [ORIG, CLEAN]}
+
+    def fake_fetch(url, token, timeout=30.0):
+        if url.endswith("/library/sections"):
+            return {"MediaContainer": {"Directory": [{"key": "1", "type": "movie"}]}}
+        if "sections/1/all?type=1" in url:
+            return movies
+        if url.endswith("/library/metadata/42"):
+            state["polls"] += 1
+            return _item_with_streams([ORIG] if state["polls"] == 1 else state["streams_after"])
+        raise AssertionError(url)
+
+    monkeypatch.setattr(plex, "_fetch_json", fake_fetch)
+    monkeypatch.setattr(plex, "_send", lambda url, token, method="PUT", timeout=30.0: state["sent"].append(url))
+    monkeypatch.setattr(plex, "_cache_path", lambda: tmp_path / "cache.json")
+    monkeypatch.setattr(plex.time, "sleep", lambda s: None)
+    return state
+
+
+def test_select_clean_audio_refreshes_waits_and_selects(plex_api):
+    p = PlexRatings("http://plex:32400", "secret")
+    msg = p.select_clean_audio(Path("/data/Movies/Heat (1995)/Heat (1995).mkv"))
+    assert "selected 'Clean (muted)'" in msg
+    assert plex_api["sent"][0] == "http://plex:32400/library/metadata/42/refresh"
+    assert plex_api["sent"][1] == "http://plex:32400/library/parts/900?audioStreamID=2&allParts=1"
+    assert plex_api["polls"] == 2          # waited one round for Plex to notice the new track
+
+
+def test_select_clean_audio_gives_up_and_skips_when_selected(plex_api):
+    p = PlexRatings("http://plex:32400", "secret")
+    plex_api["streams_after"] = [ORIG]
+    msg = p.select_clean_audio(Path("/data/Movies/Heat (1995)/Heat (1995).mkv"), wait=0)
+    assert "has not picked up" in msg and len(plex_api["sent"]) == 1   # refresh only
+    plex_api["streams_after"] = [dict(ORIG, selected=False), dict(CLEAN, selected=True)]
+    plex_api["polls"] = 1
+    assert "already selected" in p.select_clean_audio(Path("/data/Movies/Heat (1995)/Heat (1995).mkv"))
+
+
+def test_select_clean_audio_unknown_file(plex_api):
+    p = PlexRatings("http://plex:32400", "secret")
+    assert "not in the Plex library" in p.select_clean_audio(Path("/elsewhere/Nope.mkv"))
+    assert plex_api["sent"] == []

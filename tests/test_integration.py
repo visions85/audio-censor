@@ -45,7 +45,7 @@ def movie(tmp_path):
 
 def test_process_adds_beeped_clean_track(movie, tmp_path):
     rc = main(["process", str(movie), "--no-asr", "--level", "mild", "--mode", "beep", "--duck", "0",
-               "--wave", "sine", "--frequency", "1000"])
+               "--duck-channels", "all", "--wave", "sine", "--frequency", "1000"])
     assert rc == 0
     out = movie.with_name("movie.clean.mkv")
     assert out.exists()
@@ -65,6 +65,7 @@ def test_process_adds_beeped_clean_track(movie, tmp_path):
     assert sidecar.exists()
     assert "shit" in sidecar.read_text() and "damn" in sidecar.read_text()
 
+
     # clean subtitles: sidecar file next to the output and an embedded "Clean" track
     clean_srt = movie.with_name("movie.clean.en.srt")
     assert clean_srt.exists()
@@ -72,6 +73,15 @@ def test_process_adds_beeped_clean_track(movie, tmp_path):
     assert "Oh, ****. That is a **** shame." in text and "shit" not in text
     subs = info.of_type("subtitle")
     assert len(subs) == 1 and subs[0].title == "Clean" and subs[0].language == "en" and not subs[0].default
+
+def test_duck_lowers_only_the_centre_channel(movie):
+    rc = main(["process", str(movie), "--no-asr", "--level", "mild", "--mode", "duck", "--duck", "0.1"])
+    assert rc == 0
+    out = movie.with_name("movie.clean.mkv")
+    # inside the span the centre drops by ~20 dB while the surrounds play on unchanged
+    assert rms_db(movie, 0, 4.3, 5.5, "FC") - rms_db(out, 1, 4.3, 5.5, "FC") > 15
+    assert abs(rms_db(out, 1, 4.3, 5.5, "SL") - rms_db(movie, 0, 4.3, 5.5, "SL")) < 1
+    assert abs(rms_db(out, 1, 1.0, 3.0, "FC") - rms_db(movie, 0, 1.0, 3.0, "FC")) < 0.5
 
 
 def test_mute_mode_and_render_from_sidecar(movie, tmp_path):
@@ -196,10 +206,10 @@ def test_batch_survives_unexpected_exception(movie, french_movie, tmp_path, caps
     import audio_censor.cli as cli
     real = cli.scan_file
 
-    def flaky(media, cfg, args, position=""):
+    def flaky(media, cfg, args, position="", **kw):
         if media.name == "french.mkv":
             raise TypeError("open() got an unexpected keyword argument 'metadata_errors'")
-        return real(media, cfg, args, position)
+        return real(media, cfg, args, position, **kw)
 
     monkeypatch.setattr(cli, "scan_file", flaky)
     assert main(["scan", str(tmp_path), "--no-asr", "--level", "mild"]) == 1      # non-zero: something failed

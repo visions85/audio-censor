@@ -73,6 +73,7 @@ class BeepSpec:
     fade: float = 0.01
     channel: str = "center"
     duck: float = 0.1
+    duck_channels: str = "center"   # center: lower only the dialogue (centre) channel when there is one
     file_duration: float = 0.0   # filled in by the renderer (seconds), for aloop sizing
 
     @classmethod
@@ -98,6 +99,9 @@ class BeepSpec:
         duck = float(b.get("duck", 0.1))
         if not 0 <= duck <= 1:
             raise BeepError("beep.duck must be between 0 and 1")
+        duck_channels = b.get("duck_channels", "center")
+        if duck_channels not in ("center", "all"):
+            raise BeepError("beep.duck_channels must be 'center' or 'all'")
         if mode == "mute":
             duck = 0.0                     # mute is duck to silence
         elif mode == "duck" and duck == 0:
@@ -105,7 +109,7 @@ class BeepSpec:
         return cls(mode=mode, wave=wave, frequency=float(b.get("frequency", 1000)),
                    volume=parse_volume(b.get("volume", 0.4)), file=file,
                    loop_file=bool(b.get("loop_file", True)), fade=float(b.get("fade", 0.01)),
-                   channel=channel, duck=duck)
+                   channel=channel, duck=duck, duck_channels=duck_channels)
 
 
 def _f(x: float) -> str:
@@ -166,20 +170,43 @@ def beep_source(spec: BeepSpec, duration: float, rate: int, input_label: str | N
     return ",".join(chain)
 
 
+# Fine 5 ms frames let the volume gate start and stop on the word, but ffmpeg's scheduler
+# can stall muxing them beside sparse streams (Blu-ray PGS subtitles), so they are
+# regrouped to ordinary 1536-sample frames straight after the gate.
+FINE = "asetnsamples=n=240:p=0"
+REGROUP = "asetnsamples=n=1536:p=0"
+
+
+def gate_chain(audio_label: str, spans: list[Span], level: float, layout: str, channels: int,
+               which: str, out_label: str) -> list[str]:
+    """Filter lines lowering the dialogue inside every span: the centre channel only
+    (music and effects in the other channels play on) or the whole track."""
+    gate = gate_filters(spans, level)
+    names = LAYOUT_CHANNELS.get(layout) or LAYOUT_CHANNELS.get(_DEFAULT_LAYOUT_FOR_CHANNELS.get(channels, ""))
+    if which != "center" or not names or "FC" not in names or len(names) < 3:
+        return [f"[{audio_label}]{FINE},{gate},{REGROUP}[{out_label}]"]
+    lay = layout if layout in LAYOUT_CHANNELS else _DEFAULT_LAYOUT_FOR_CHANNELS[channels]
+    split = "".join(f"[{out_label}_{n}]" for n in names)
+    joined = "".join(f"[{out_label}_FCg]" if n == "FC" else f"[{out_label}_{n}]" for n in names)
+    mapping = "|".join(f"{i}.0-{n}" for i, n in enumerate(names))
+    # Every channel gets the same fine frames: join waits forever when its inputs differ.
+    return [
+        f"[{audio_label}]{FINE},channelsplit=channel_layout={lay}{split}",
+        f"[{out_label}_FC]{gate}[{out_label}_FCg]",
+        f"{joined}join=inputs={len(names)}:channel_layout={lay}:map={mapping},{REGROUP}[{out_label}]",
+    ]
+
+
 def build_filtergraph(spans: list[Span], spec: BeepSpec, *, audio_label: str, layout: str,
                       channels: int, rate: int, file_input: int | None = None,
                       out_label: str = "clean") -> str:
     """Full filter_complex script: gated dialogue mixed with positioned beeps -> [out_label]."""
     if not spans:
         return f"[{audio_label}]anull[{out_label}]"
-    lines = []
-    gate = gate_filters(spans, spec.duck)
-    # asetnsamples gives the timeline gate ~5 ms resolution instead of one decoder frame.
     if spec.mode in ("mute", "duck"):
-        lines.append(f"[{audio_label}]asetnsamples=n=240:p=0,{gate}[{out_label}]")
-        return ";\n".join(lines)
+        return ";\n".join(gate_chain(audio_label, spans, spec.duck, layout, channels, spec.duck_channels, out_label))
 
-    lines.append(f"[{audio_label}]asetnsamples=n=240:p=0,{gate}[dlg]")
+    lines = gate_chain(audio_label, spans, spec.duck, layout, channels, spec.duck_channels, "dlg")
     n = len(spans)
     if spec.wave == "file":
         if file_input is None:
@@ -193,7 +220,7 @@ def build_filtergraph(spans: list[Span], spec: BeepSpec, *, audio_label: str, la
     inputs = "".join(f"[b{i}]" for i in range(n))
     pan = pan_filter(layout, channels, spec.channel)
     lines.append(f"{inputs}amix=inputs={n}:duration=longest:normalize=0,{pan}[beeps]")
-    lines.append(f"[dlg][beeps]amix=inputs=2:duration=first:normalize=0[{out_label}]")
+    lines.append(f"[dlg][beeps]amix=inputs=2:duration=first:normalize=0,{REGROUP}[{out_label}]")
     return ";\n".join(lines)
 
 

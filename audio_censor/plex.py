@@ -1,4 +1,4 @@
-"""Content ratings from a Plex Media Server.
+"""Content ratings from a Plex Media Server, and picking the clean track there.
 
 Plex keeps ratings in its own database and never writes NFO files, so we ask the server
 once per run for every movie and episode it knows, with its file paths and
@@ -21,7 +21,7 @@ from .media import eprint
 from .ratings import normalize
 
 CACHE_TTL = 6 * 3600
-CACHE_VERSION = 2
+CACHE_VERSION = 3
 ORDERS = ("name", "rating", "added", "watched")
 
 
@@ -48,6 +48,23 @@ def _fetch_json(url: str, token: str, timeout: float = 30.0) -> dict:
         raise PlexError(f"unreadable response from Plex for {url.split('?')[0]}: {exc}") from exc
     except (urllib.error.URLError, TimeoutError) as exc:
         raise PlexError(f"could not reach Plex at {url.split('/library')[0]}: {exc}") from exc
+
+
+def _send(url: str, token: str, method: str = "PUT", timeout: float = 30.0) -> None:
+    """A request that changes something on the server (refresh, stream selection)."""
+    req = urllib.request.Request(url, method=method, headers={"X-Plex-Token": token, "Accept": "application/json"})
+    try:
+        with urllib.request.urlopen(req, timeout=timeout) as resp:
+            resp.read()
+    except urllib.error.HTTPError as exc:
+        hint = " (bad token?)" if exc.code == 401 else ""
+        raise PlexError(f"Plex returned HTTP {exc.code} for {url.split('?')[0]}{hint}") from exc
+    except (urllib.error.URLError, TimeoutError) as exc:
+        raise PlexError(f"could not reach Plex at {url.split('/library')[0]}: {exc}") from exc
+
+
+def is_clean_title(title: str | None) -> bool:
+    return (title or "").strip().lower().startswith("clean")
 
 
 def _printable(text: str) -> str:
@@ -125,7 +142,7 @@ class PlexRatings:
                 score = self._score(item)
                 if score < 0:
                     score = self._score(show)
-                entry = {"content": content, "score": score,
+                entry = {"content": content, "score": score, "key": str(item.get("ratingKey") or ""),
                          "added": int(item.get("addedAt") or 0), "views": int(item.get("viewCount") or 0),
                          "title": _printable(item.get("grandparentTitle") or item.get("title") or "")}
                 for media in item.get("Media", []):
@@ -176,6 +193,53 @@ class PlexRatings:
     def rating_for(self, media: Path) -> str:
         info = self.info_for(media)
         return info["content"] if info else ""
+
+    # ------------------------------------------------------------------ clean track
+
+    def _part_for(self, key: str, target: Path) -> dict | None:
+        """The item's media part holding `target` (matched on folder + file name)."""
+        data = _fetch_json(f"{self.url}/library/metadata/{key}", self.token)
+        items = (data.get("MediaContainer") or {}).get("Metadata") or []
+        want = _parts(str(target))[-2:]
+        for item in items:
+            for media in item.get("Media", []):
+                for part in media.get("Part", []):
+                    if _parts(part.get("file") or "")[-2:] == want:
+                        return part
+        return None
+
+    def select_clean_audio(self, media: Path, target: Path | None = None, wait: float = 90.0,
+                           poll: float = 3.0) -> str:
+        """Make Plex play the clean track of `target` (the file holding it; default `media`).
+
+        Plex keeps its own idea of a file's tracks and remembers the last audio track
+        chosen per film, which beats the file's default flag. So: refresh the film, wait
+        until Plex lists a "Clean ..." audio stream, then select it for every part.
+        The choice is stored for the account whose token is used. Returns a log line.
+        """
+        target = target or media
+        info = self.info_for(media) or self.info_for(target)
+        if not info or not info.get("key"):
+            return "not in the Plex library (yet); scan the library, then run 'audio-censor plex-select'"
+        key = info["key"]
+        _send(f"{self.url}/library/metadata/{key}/refresh", self.token)
+        deadline = time.time() + wait
+        while True:
+            part = self._part_for(key, target)
+            streams = (part or {}).get("Stream", [])
+            clean = [s for s in streams if s.get("streamType") == 2 and is_clean_title(s.get("title"))]
+            if clean:
+                break
+            if time.time() >= deadline:
+                return (f"Plex has not picked up the clean track after {int(wait)} s; "
+                        "run 'audio-censor plex-select' once it has")
+            time.sleep(poll)
+        stream = clean[0]
+        if stream.get("selected"):
+            return f"clean track already selected ({info.get('title') or target.name})"
+        q = urllib.parse.urlencode({"audioStreamID": stream["id"], "allParts": 1})
+        _send(f"{self.url}/library/parts/{part['id']}?{q}", self.token)
+        return f"selected '{stream.get('title')}' for {info.get('title') or target.name}"
 
     def order(self, files: list[Path], by: str) -> tuple[list[Path], int]:
         """Sort files by a Plex field, best first; unknown files last. -> (sorted, matched count)."""

@@ -59,6 +59,7 @@ moderate = [
   "twat*", "wank*", "prick", "pricks",
   "whore*", "slut*", "skank*",
   "goddamn*", "god damn*", "goddammit", "god dammit",
+  "goddam", "goddams", "god dam", "goddamit", "god damit", "godamn*", "godammit",
   "piss", "pissed", "pisser", "pissers", "pissing", "pisses", "piss off", "tits", "titties", "boobs",
   "bollocks", "bugger*", "tosser", "douche*", "douchebag*",
   "jesus christ", "jesus h christ", "christ almighty",

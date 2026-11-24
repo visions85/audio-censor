@@ -43,12 +43,37 @@ def test_default_mode_is_duck():
 
 
 def test_beep_graph_shape():
-    g = build_filtergraph(SPANS, spec(mode="beep", duck=0), audio_label="0:a:0", layout="5.1(side)", channels=6, rate=48000)
+    g = build_filtergraph(SPANS, spec(mode="beep", duck=0, duck_channels="all"), audio_label="0:a:0",
+                          layout="5.1(side)", channels=6, rate=48000)
     assert g.startswith("[0:a:0]asetnsamples=n=240:p=0,volume=volume=0:enable=")
     assert "aevalsrc=exprs='0.4*sin(2*PI*1000*t)':s=48000:c=mono:d=0.5" in g
     assert "adelay=48000S:all=1[b0]" in g and "adelay=492000S:all=1[b1]" in g
     assert "[b0][b1]amix=inputs=2:duration=longest:normalize=0,pan=5.1(side)|FC=c0[beeps]" in g
-    assert g.endswith("[dlg][beeps]amix=inputs=2:duration=first:normalize=0[clean]")
+    assert g.endswith("[dlg][beeps]amix=inputs=2:duration=first:normalize=0,asetnsamples=n=1536:p=0[clean]")
+
+
+def test_duck_center_only_on_surround():
+    g = build_filtergraph(SPANS, spec(mode="duck", duck=0.1), audio_label="0:a:0", layout="5.1(side)",
+                          channels=6, rate=48000)
+    lines = g.split(";\n")
+    assert lines[0] == ("[0:a:0]asetnsamples=n=240:p=0,channelsplit=channel_layout=5.1(side)"
+                        "[clean_FL][clean_FR][clean_FC][clean_LFE][clean_SL][clean_SR]")
+    assert lines[1].startswith("[clean_FC]volume=volume=0.1:enable=") and lines[1].endswith("[clean_FCg]")
+    assert lines[2] == ("[clean_FL][clean_FR][clean_FCg][clean_LFE][clean_SL][clean_SR]join=inputs=6:"
+                        "channel_layout=5.1(side):map=0.0-FL|1.0-FR|2.0-FC|3.0-LFE|4.0-SL|5.0-SR,"
+                        "asetnsamples=n=1536:p=0[clean]")
+    # an unknown layout name falls back to the usual layout for the channel count
+    g = build_filtergraph(SPANS, spec(mode="duck"), audio_label="0:a:0", layout="", channels=6, rate=48000)
+    assert "channelsplit=channel_layout=5.1(side)" in g
+
+
+def test_duck_whole_track_without_a_centre_channel():
+    for layout, ch in (("stereo", 2), ("quad", 4), ("mono", 1)):
+        g = build_filtergraph(SPANS, spec(mode="duck"), audio_label="0:a:0", layout=layout, channels=ch, rate=48000)
+        assert "channelsplit" not in g and g.endswith("asetnsamples=n=1536:p=0[clean]")
+    g = build_filtergraph(SPANS, spec(mode="duck", duck_channels="all"), audio_label="0:a:0",
+                          layout="5.1(side)", channels=6, rate=48000)
+    assert "channelsplit" not in g
 
 
 def test_mute_graph_has_no_beeps():
