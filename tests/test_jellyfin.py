@@ -109,3 +109,12 @@ def test_add_version_announces_then_merges(monkeypatch):
     msg = j.add_version(Path("/mnt/x/Film (1989)/Film.1989.Remux.mkv"), Path("/mnt/x/Film (1989)/Film (1989) {edition-Family}.mkv"))
     assert msg == "added as a second version of the film"
     assert calls["announced"] == new and calls["merged"] == "o1,n2"
+
+
+def test_finds_a_version_merged_under_its_edition(server):
+    j = Jellyfin("http://jf", "k3y")
+    edition = "/movies/Heat (1995)/Heat (1995) {edition-Family}.mkv"
+    original = "/movies/Heat (1995)/Heat.1995.Remux.mkv"
+    server["items"] = [{"Id": "m9", "Path": edition}]
+    server["search"] = [{"Id": "m9", "Path": edition, "MediaSources": [{"Path": edition}, {"Path": original}]}]
+    assert j.item_id(Path("/mnt/share/Heat (1995)/Heat.1995.Remux.mkv")) == "m9"

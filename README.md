@@ -251,6 +251,18 @@ default flag, so it plays the clean track once it has re-read the file. With
 waits until it lists the clean track as default. A Jellyfin user with "remember audio
 selections" on who already picked another track keeps that choice.
 
+### Clean audio beside the film, no remux: `--audio-sidecar`
+
+```bash
+audio-censor process --audio-sidecar "/media/films/Hook (1991)"
+```
+
+writes only the clean track, as `<film>.Clean (muted).eng.default.mka` next to the
+film, plus the clean subtitles. The film itself is never rewritten. Jellyfin loads
+external audio files with the film and, from the `.default` in the name, plays the
+clean one by default. Plex ignores external audio, so this mode is for Jellyfin
+libraries. Remux later with a normal `process --overwrite` if Plex needs it too.
+
 ## Skipping scenes in Jellyfin
 
 Audio and subtitles can be cleaned; pictures cannot. For a scene that should not be
@@ -376,6 +388,14 @@ time it takes to re-encode one audio track:
    default so players pick it automatically. Pass `--no-default` to keep the original
    as default or `--replace-audio` to drop the originals.
 4. The censored subtitle file is muxed in as a "Clean" subtitle track in the same pass.
+
+Speech recognition listens to the dialogue (centre) channel of a 5.1/7.1 track
+rather than a downmix, so music and effects drown out fewer words
+(`channel = "mix"` under `[asr]` restores the downmix). Any swear the subtitles have
+but the transcript missed is then listened to again on its own: Whisper re-reads just
+that subtitle line's few seconds with a wider search. A word heard this way is muted
+exactly; otherwise the mute is placed by its position in the line (`recheck = false`
+turns the second pass off). Transcripts made from a downmix are redone automatically.
 
 Output defaults to `<name>.clean.mkv` beside the source. MP4 input works; text
 subtitles are converted to SRT for the MKV container.

@@ -72,3 +72,15 @@ def test_edition_cuts_video_audio_and_subtitles(tmp_path):
     # the original is back to its own chapters, the scene list is kept for the edition
     assert all(c.title != "Skip" for c in scenes.read_chapters(film))
     assert scenes.load(film)["scenes"] and "Family" in scenes.load(film)["edition"]
+
+
+def test_folder_expansion_leaves_our_editions_alone(tmp_path):
+    from audio_censor.cli import expand_inputs
+    folder = tmp_path / "Film (2000)"
+    folder.mkdir()
+    for name, title in (("Film.2000.mkv", "Main"), ("Film (2000) {edition-Family}.mkv", "Clean (muted)"),
+                        ("Film (2000) {edition-Director's Cut}.mkv", "Main")):
+        subprocess.run(["ffmpeg", "-y", "-v", "error", "-f", "lavfi", "-i", "sine=d=1", "-c:a", "ac3",
+                        "-metadata:s:a:0", f"title={title}", str(folder / name)], check=True)
+    assert sorted(p.name for p in expand_inputs([str(folder)], False)) == [
+        "Film (2000) {edition-Director's Cut}.mkv", "Film.2000.mkv"]

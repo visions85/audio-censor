@@ -141,18 +141,39 @@ def pick_audio_stream(info: MediaInfo, languages: list[str], requested: int | No
     return audio[0]
 
 
-def extract_audio_wav(path: Path, audio_type_index: int, out: Path, rate: int = 16000) -> Path:
-    """Mono 16 kHz PCM for speech recognition."""
-    run(["ffmpeg", "-y", "-v", "error", "-i", str(path), "-map", f"0:a:{audio_type_index}",
-         "-vn", "-sn", "-dn", "-ac", "1", "-ar", str(rate), "-c:a", "pcm_s16le", str(out)])
+# Surround layouts without a front-centre channel (ffmpeg names).
+_NO_CENTER = {"mono", "stereo", "2.1", "quad", "quad(side)", "6.0(front)", "downmix", "2 channels"}
+
+
+def has_center(stream: "Stream | None") -> bool:
+    """Does this audio stream carry a separate front-centre (dialogue) channel?"""
+    if stream is None or stream.channels < 3:
+        return False
+    layout = (stream.channel_layout or "").lower()
+    return layout not in _NO_CENTER
+
+
+def _mono_args(audio_type_index: int, center: bool) -> list[str]:
+    if center:
+        # Dialogue lives in the centre channel; music and effects mostly do not, so
+        # Whisper hears far fewer words drowned out than in a full downmix.
+        return ["-filter_complex", f"[0:a:{audio_type_index}]pan=mono|c0=FC[d]", "-map", "[d]"]
+    return ["-map", f"0:a:{audio_type_index}", "-ac", "1"]
+
+
+def extract_audio_wav(path: Path, audio_type_index: int, out: Path, rate: int = 16000,
+                      center: bool = False) -> Path:
+    """Mono 16 kHz PCM for speech recognition (the centre channel alone when `center`)."""
+    run(["ffmpeg", "-y", "-v", "error", "-i", str(path), *_mono_args(audio_type_index, center),
+         "-vn", "-sn", "-dn", "-ar", str(rate), "-c:a", "pcm_s16le", str(out)])
     return out
 
 
 def extract_audio_clip(path: Path, audio_type_index: int, out: Path, start: float, length: float,
-                       rate: int = 16000) -> Path:
-    """A short mono clip, for language detection."""
+                       rate: int = 16000, center: bool = False) -> Path:
+    """A short mono clip, for language detection and rechecking single words."""
     run(["ffmpeg", "-y", "-v", "error", "-ss", f"{start:.3f}", "-t", f"{length:.3f}", "-i", str(path),
-         "-map", f"0:a:{audio_type_index}", "-vn", "-sn", "-dn", "-ac", "1", "-ar", str(rate),
+         *_mono_args(audio_type_index, center), "-vn", "-sn", "-dn", "-ar", str(rate),
          "-c:a", "pcm_s16le", str(out)])
     return out
 

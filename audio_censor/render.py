@@ -263,6 +263,56 @@ def render(media: Path, info: MediaInfo, dialogue: Stream, spans: list[Span], sp
     return output
 
 
+def audio_sidecar_path(media: Path, title: str, lang: str) -> Path:
+    """`Movie.Clean (muted).eng.default.mka`: Jellyfin reads the dot-separated tokens after
+    the film's name as title, language and the default flag."""
+    return media.with_name(f"{media.stem}.{title}.{lang}.default.mka")
+
+
+def render_audio_sidecar(media: Path, info: MediaInfo, dialogue: Stream, spans: list[Span], spec: BeepSpec,
+                         cfg: dict, output: Path, dry_run: bool = False, verbose: bool = False) -> Path:
+    """Encode just the clean track into its own file beside the film (no remux)."""
+    inputs = ["-i", str(media)]
+    file_input = None
+    if spec.mode == "beep" and spec.wave == "file":
+        file_input = 1
+        spec.file_duration = probe(spec.file).duration
+        inputs += ["-i", str(spec.file)]
+    rate = dialogue.sample_rate or 48000
+    graph = build_filtergraph(spans, spec, audio_label=f"0:a:{dialogue.type_index}",
+                              layout=dialogue.channel_layout, channels=dialogue.channels or 2,
+                              rate=rate, file_input=file_input)
+    codec, bitrate = choose_codec(dialogue, cfg)
+    tmp_out = output.with_name(f".{output.stem}.partial.mka")
+    with tempfile.TemporaryDirectory(prefix="audio-censor-") as tmp:
+        script = Path(tmp) / "filter.txt"
+        script.write_text(graph + "\n", encoding="utf-8")
+        cmd = ["ffmpeg", "-y", "-hide_banner", "-loglevel", "warning", "-stats", *inputs,
+               filter_script_option(), str(script), "-map", "[clean]", "-vn", "-sn", "-dn",
+               "-c:a", codec]
+        if bitrate:
+            cmd += ["-b:a", bitrate]
+        if codec == "aac" and (dialogue.channels or 2) > 2:
+            cmd += ["-ac", str(dialogue.channels)]
+        cmd += ["-metadata:s:a:0", f"title={clean_title(spec, cfg)}",
+                "-metadata:s:a:0", f"language={dialogue.language or 'eng'}", "-disposition:a:0", "default",
+                "-f", "matroska", str(tmp_out)]
+        if verbose or dry_run:
+            eprint("filter graph:\n" + graph)
+            eprint("command:\n  " + " ".join(_quote(c) for c in cmd))
+        if dry_run:
+            return output
+        eprint(f"  encoding clean track -> {output.name}")
+        try:
+            run(cmd, quiet=False)
+            if abs(probe(tmp_out).duration - info.duration) > 2.0:
+                raise MediaError(f"clean track is {probe(tmp_out).duration:.1f} s, the film {info.duration:.1f} s")
+            os.replace(tmp_out, output)
+        finally:
+            tmp_out.unlink(missing_ok=True)
+    return output
+
+
 def render_preview(spec: BeepSpec, output: Path, duration: float = 1.0, rate: int = 48000) -> Path:
     inputs = []
     if spec.wave == "file":

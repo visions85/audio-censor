@@ -99,9 +99,13 @@ class Jellyfin:
         # Jellyfin's full listing can leave items out (seen with Home Alone) that its
         # search still finds: search by the folder's title and match the path.
         title = re.sub(r"\s*[\[({].*$", "", Path(s).parent.name).strip() or Path(s).stem
-        data = self._get("/Items", Recursive="true", IncludeItemTypes="Movie,Episode", Fields="Path",
+        data = self._get("/Items", Recursive="true", IncludeItemTypes="Movie,Episode", Fields="Path,MediaSources",
                          SearchTerm=title)
-        ids = {i["Id"] for i in data.get("Items", []) if _parts(i.get("Path") or "")[-2:] == parts[-2:]}
+        # A film merged with its edition is one item whose Path is only one of its
+        # versions; the others are among its MediaSources.
+        ids = {i["Id"] for i in data.get("Items", [])
+               if any(_parts(p or "")[-2:] == parts[-2:]
+                      for p in [i.get("Path")] + [m.get("Path") for m in i.get("MediaSources") or []])}
         return ids.pop() if len(ids) == 1 else None
 
     def _audio_streams(self, item_id: str, target: Path) -> list[dict]:

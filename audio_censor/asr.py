@@ -34,7 +34,8 @@ def transcript_path(media: Path) -> Path:
     return media.with_name(media.stem + ".transcript.json")
 
 
-def load_transcript(path: Path, expect_model: str | None = None) -> list[Word] | None:
+def load_transcript(path: Path, expect_model: str | None = None,
+                    expect_channel: str | None = None) -> list[Word] | None:
     if not path.exists():
         return None
     try:
@@ -43,11 +44,14 @@ def load_transcript(path: Path, expect_model: str | None = None) -> list[Word] |
         return None
     if expect_model and doc.get("model") not in (None, expect_model):
         return None
+    # transcripts made before centre-channel listening heard the full downmix
+    if expect_channel and doc.get("channel", "mix") != expect_channel:
+        return None
     return [Word(**w) for w in doc.get("words", [])]
 
 
-def save_transcript(path: Path, words: list[Word], model: str, audio_track: int) -> None:
-    doc = {"model": model, "audio_track": audio_track, "words": [asdict(w) for w in words]}
+def save_transcript(path: Path, words: list[Word], model: str, audio_track: int, channel: str = "mix") -> None:
+    doc = {"model": model, "audio_track": audio_track, "channel": channel, "words": [asdict(w) for w in words]}
     path.write_text(json.dumps(doc), encoding="utf-8")
 
 
@@ -147,7 +151,7 @@ def _get_model(cfg: dict):
 
 
 def detect_language(media: Path, audio_track: int, duration: float, cfg: dict, work: Path,
-                    clip_len: float = 30.0) -> tuple[str, float]:
+                    clip_len: float = 30.0, center: bool = False) -> tuple[str, float]:
     """Whisper language ID on up to three clips spread through the file -> (code, confidence)."""
     from .media import extract_audio_clip
     model = _get_model(cfg)
@@ -158,7 +162,8 @@ def detect_language(media: Path, audio_track: int, duration: float, cfg: dict, w
     votes: dict[str, float] = {}
     for i, start in enumerate(starts):
         clip = work / f"langclip{i}.wav"
-        extract_audio_clip(media, audio_track, clip, start, min(clip_len, max(1.0, duration - start)))
+        extract_audio_clip(media, audio_track, clip, start, min(clip_len, max(1.0, duration - start)),
+                           center=center)
         _segments, info = model.transcribe(load_wav(clip), beam_size=1, vad_filter=True, word_timestamps=False)
         if info.language:
             votes[info.language] = votes.get(info.language, 0.0) + float(info.language_probability or 0.0)
@@ -244,3 +249,45 @@ def scan_words(words: list[Word], matcher: Matcher, detector=None) -> list[Hit]:
         hits.append(Hit(start=first.start, end=last.end, word=m.text, pattern=m.pattern.raw,
                         tier=m.pattern.tier, source="asr", confidence=prob, name_use=name_use))
     return hits
+
+
+def recheck_subtitle_hits(media: Path, audio_track: int, sub_hits: list[Hit], asr_hits: list[Hit],
+                          matcher: Matcher, cfg: dict, work: Path, center: bool = False,
+                          detector=None, margin: float = 1.5) -> tuple[list[Hit], int]:
+    """Listen again, closely, to each subtitle line whose swear the full transcript missed.
+
+    A long transcription skips or tidies words under music and shouting; the same few
+    seconds transcribed on their own, with a wider beam and no voice-activity cut,
+    often hear them. A word found this way gets exact timing instead of the estimate
+    from its position in the subtitle line. Returns (new ASR hits, lines checked).
+    """
+    from .media import extract_audio_clip
+    from .spans import _same_pattern
+    pending = []
+    for sh in sub_hits:
+        if sh.name_use:
+            continue
+        cs = sh.cue_start if sh.cue_start is not None else sh.start
+        ce = sh.cue_end if sh.cue_end is not None else sh.end
+        if any(_same_pattern(sh, ah) and ah.start >= cs - 2.0 and ah.end <= ce + 2.0 for ah in asr_hits):
+            continue
+        pending.append((sh, cs, ce))
+    if not pending:
+        return [], 0
+    model = _get_model(cfg)
+    found: list[Hit] = []
+    for i, (sh, cs, ce) in enumerate(pending):
+        start = max(0.0, cs - margin)
+        clip = work / f"recheck{i}.wav"
+        extract_audio_clip(media, audio_track, clip, start, (ce + margin) - start, center=center)
+        segments, _ = model.transcribe(load_wav(clip), language=cfg.get("asr", {}).get("language") or None,
+                                       beam_size=10, word_timestamps=True, vad_filter=False,
+                                       condition_on_previous_text=False)
+        words = [Word(start + float(w.start), start + float(w.end), w.word, float(getattr(w, "probability", 1.0)))
+                 for seg in segments for w in seg.words or []]
+        clip.unlink(missing_ok=True)
+        for h in scan_words(words, matcher, detector):
+            if not h.name_use and _same_pattern(sh, h) and h.start >= cs - margin and h.end <= ce + margin \
+                    and not any(_same_pattern(h, f) and abs(h.start - f.start) < 0.3 for f in found):
+                found.append(h)
+    return found, len(pending)

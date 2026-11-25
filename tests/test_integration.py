@@ -275,3 +275,19 @@ def test_in_place_verification_failure_keeps_original(movie, tmp_path, monkeypat
     assert movie.read_bytes() == before
     assert not (tmp_path / "movie.clean.tmp.mkv").exists()
     assert '"rendered_in_place"' not in (tmp_path / "movie.censor.json").read_text()
+
+
+def test_audio_sidecar_leaves_the_film_alone(movie):
+    before = movie.stat().st_size, movie.stat().st_mtime
+    assert main(["process", str(movie), "--no-asr", "--level", "mild", "--mode", "mute", "--audio-sidecar"]) == 0
+    assert (movie.stat().st_size, movie.stat().st_mtime) == before          # film untouched
+    track = movie.with_name("movie.Clean (muted).eng.default.mka")
+    assert track.exists()
+    info = probe(track)
+    assert not info.of_type("video") and [a.title for a in info.of_type("audio")] == ["Clean (muted)"]
+    assert abs(info.duration - probe(movie).duration) < 0.5
+    assert movie.with_name("movie.en.clean.srt").exists()
+    # the span is censored in the side track like in a remux
+    assert rms_db(track, 0, 4.3, 5.5, "FC") < -40
+    # a second run finds it done
+    assert main(["process", str(movie), "--no-asr", "--level", "mild", "--mode", "mute", "--audio-sidecar"]) == 0

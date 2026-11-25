@@ -26,6 +26,7 @@ DEFAULTS: dict = {
         "audio_only_languages": True,  # only censor audio whose dialogue is in `languages`
         "detect_language": True,       # use Whisper language ID when the audio track is untagged
         "assume_untagged": "eng",      # language assumed for untagged tracks when detection is unavailable ("" = skip)
+        "min_language_confidence": 0.6,  # below this, a detected language is ignored and assume_untagged used
         "skip_ratings": ["G", "TV-Y", "TV-Y7", "TV-Y7-FV", "TV-G"],   # ratings (from NFO / tags / Plex) to skip
         # An ASR-only hit is dropped when the subtitle line at that moment contains one of
         # these innocent sound-alikes and not the flagged word itself ("Hoover Dam").
@@ -47,6 +48,8 @@ DEFAULTS: dict = {
         "beam_size": 5,
         "vad": True,
         "initial_prompt": DEFAULT_PROMPT,
+        "channel": "center",           # center: hear only a surround track's dialogue channel | mix
+        "recheck": True,               # re-listen to subtitle lines whose swear the transcript missed
     },
     "beep": {
         "mode": "duck",                # duck (lower the dialogue) | mute | beep
@@ -70,6 +73,8 @@ DEFAULTS: dict = {
         "set_default": True,           # make the clean track the default audio
         "keep_original": True,         # keep the original audio tracks in the output
         "in_place": False,             # rewrite the original file with the clean track added (no second copy)
+        "audio_sidecar": False,        # write only the clean track, as <file>.Clean (muted).eng.default.mka
+                                       # beside the film (Jellyfin loads it; Plex cannot); wins over in_place
         "backup": False,               # in-place: keep the original as <name>.orig.<ext>
     },
     "subtitles": {
@@ -141,6 +146,8 @@ model = "small"             # small is a fine CPU default; medium or large-v3 on
 device = "auto"
 compute_type = "auto"
 language = "en"
+channel = "center"          # center: listen to a surround track's dialogue channel only | mix: all channels
+recheck = true              # re-listen closely to subtitle lines whose swear the transcript missed
 
 [beep]
 mode = "duck"               # duck | mute | beep

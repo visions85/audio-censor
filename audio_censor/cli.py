@@ -18,12 +18,13 @@ from pathlib import Path
 from . import __version__, asr, edition, scenes, staging, thrash
 from .beep import BeepError, BeepSpec, WAVES
 from .config import default_config_path, load_config, write_template
-from .media import VIDEO_EXTS, MediaError, eprint, language_matches, pick_audio_stream, probe, run
+from .media import (VIDEO_EXTS, MediaError, eprint, has_center, is_own_clean_audio, language_matches,
+                    pick_audio_stream, probe, run)
 from .names import NameDetector
 from .jellyfin import Jellyfin, JellyfinError
 from .plex import ORDERS, PlexError, PlexRatings
 from .ratings import find_rating, should_skip
-from .render import (check_disk_space, default_output, finalize_in_place, is_clean_track, remux_with_subtitles,
+from .render import (audio_sidecar_path, clean_title, render_audio_sidecar, check_disk_space, default_output, finalize_in_place, is_clean_track, remux_with_subtitles,
                      render, render_preview, temp_output_for)
 from .spans import Span, build_spans, format_table, load_sidecar, save_sidecar, sidecar_path, veto_by_subtitles
 from .subtitles import (STYLES, find_external, find_subtitle_source, load_cues, pick_embedded, scan_cues,
@@ -37,6 +38,18 @@ class UserError(Exception):
 
 # ----------------------------------------------------------------------------- helpers
 
+def _our_edition(path: Path) -> bool:
+    """A cut edition this tool made (`... {edition-Family}.mkv`): every audio track is
+    already one of our clean tracks, so there is nothing left to censor in it."""
+    if "{edition-" not in path.name:
+        return False
+    try:
+        audio = probe(path).of_type("audio")
+    except MediaError:
+        return False
+    return bool(audio) and all(is_own_clean_audio(a) for a in audio)
+
+
 def expand_inputs(paths: list[str], recursive: bool) -> list[Path]:
     files: list[Path] = []
     for raw in paths:
@@ -44,7 +57,7 @@ def expand_inputs(paths: list[str], recursive: bool) -> list[Path]:
         if p.is_dir():
             it = p.rglob("*") if recursive else p.iterdir()
             files += sorted(f for f in it if f.is_file() and f.suffix.lower() in VIDEO_EXTS
-                            and ".clean." not in f.name)
+                            and ".clean." not in f.name and not _our_edition(f))
         elif p.exists():
             files.append(p)
         else:
@@ -86,6 +99,8 @@ def apply_overrides(cfg: dict, args: argparse.Namespace) -> dict:
         cfg["beep"]["duck_channels"] = args.duck_channels
     if g("in_place"):
         cfg["output"]["in_place"] = True
+    if g("audio_sidecar"):
+        cfg["output"]["audio_sidecar"] = True
     if g("backup"):
         cfg["output"]["backup"] = True
     if g("codec"):
@@ -183,19 +198,29 @@ def scan_file(media: Path, cfg: dict, args: argparse.Namespace, position: str = 
                 words = None
                 tpath = asr.transcript_path(media)
                 if scan_cfg.get("cache_transcript", True) and not getattr(args, "rescan", False):
-                    words = asr.load_transcript(tpath, cfg["asr"]["model"])
+                    words = asr.load_transcript(tpath, cfg["asr"]["model"], _asr_channel(cfg, dialogue))
                     if words is not None:
                         eprint(f"  asr: using cached transcript {tpath.name} ({len(words)} words)")
                 if words is None:
                     wav = work / "dialogue.wav"
-                    eprint("  extracting audio for speech recognition ...")
+                    channel = _asr_channel(cfg, dialogue)
+                    eprint("  extracting audio for speech recognition"
+                           + (" (dialogue channel only)" if channel == "center" else "") + " ...")
                     from .media import extract_audio_wav
-                    extract_audio_wav(media, dialogue.type_index, wav)
+                    extract_audio_wav(media, dialogue.type_index, wav, center=channel == "center")
                     words = asr.transcribe(wav, cfg, info.duration)
-                    asr.release_models()
+                    wav.unlink(missing_ok=True)
                     if scan_cfg.get("cache_transcript", True):
-                        asr.save_transcript(tpath, words, cfg["asr"]["model"], dialogue.type_index)
+                        asr.save_transcript(tpath, words, cfg["asr"]["model"], dialogue.type_index, channel)
                 asr_hits = asr.scan_words(words, matcher, detector)
+                if sub_hits and cfg["asr"].get("recheck", True):
+                    extra, checked = asr.recheck_subtitle_hits(
+                        media, dialogue.type_index, sub_hits, asr_hits, matcher, cfg, work,
+                        center=_asr_channel(cfg, dialogue) == "center", detector=detector)
+                    if checked:
+                        eprint(f"  asr recheck: heard {len(extra)} of {checked} word(s) found only in the subtitles")
+                    asr_hits += extra
+                asr.release_models()
                 names = sum(h.name_use for h in asr_hits)
                 asr_hits = veto_by_subtitles(asr_hits, cues, scan_cfg.get("homophones", {}))
                 vetoed = sum(h.name_use for h in asr_hits) - names
@@ -239,7 +264,9 @@ def _plex_select(media: Path, out: Path | None, cfg: dict, args, wait: float = 9
     if out is None or getattr(args, "dry_run", False) or getattr(args, "no_plex_select", False):
         return 0
     failed = 0
-    plex = _plex(cfg, args) if cfg.get("plex", {}).get("select_clean", True) else None
+    plex = _plex(cfg, args) if cfg.get("plex", {}).get("select_clean", True) and not audio_sidecar(cfg) else None
+    if audio_sidecar(cfg) and out.suffix.lower() == ".mka":
+        out = media          # Jellyfin lists a beside-the-film track under the film itself
     if plex is not None:
         try:
             eprint(f"  plex: {plex.select_clean_audio(media, out, wait=wait)}")
@@ -305,12 +332,26 @@ def decide_audio_language(media: Path, info, dialogue, cfg: dict, args, work: Pa
         return True, lang, "any"
     if not lang:
         if scan.get("detect_language", True) and scan.get("use_asr", True) and asr.available():
-            lang, prob = asr.detect_language(media, dialogue.type_index, info.duration, cfg, work)
+            lang, prob = asr.detect_language(media, dialogue.type_index, info.duration, cfg, work,
+                                             center=_asr_channel(cfg, dialogue) == "center")
             how = f"whisper, {prob:.0%} confidence"
+            floor = float(scan.get("min_language_confidence", 0.6))
+            assumed = (scan.get("assume_untagged") or "").lower()
+            if prob < floor and assumed:
+                # A shaky guess (The Sandlot's music-heavy opening came out as 41% Norwegian)
+                # must not switch censoring off: fall back to the assumed language.
+                how = f"whisper unsure ({lang} at {prob:.0%}), assumed {assumed}"
+                lang = assumed
         else:
             lang = (scan.get("assume_untagged") or "").lower()
             how = "untagged, assumed" if lang else "untagged"
     return language_matches(lang, cfg["languages"]), lang, how
+
+
+def _asr_channel(cfg: dict, stream) -> str:
+    """What Whisper listens to: "center" (the dialogue channel of a surround track) or "mix"."""
+    want = str(cfg["asr"].get("channel", "center")).lower()
+    return "center" if want == "center" and has_center(stream) else "mix"
 
 
 def _ocr_opts(cfg: dict, args=None) -> dict:
@@ -346,7 +387,12 @@ def _full_reads(media: Path, cfg: dict, args, render: bool) -> int:
         return 99
     reads = 1 if render else 0
     if scan["use_asr"] and asr.available():
-        cached = use_cache and asr.load_transcript(asr.transcript_path(media), cfg["asr"]["model"]) is not None
+        try:
+            channel = _asr_channel(cfg, pick_audio_stream(info, cfg["languages"], getattr(args, "audio_track", None)))
+        except MediaError:
+            channel = None
+        cached = use_cache and asr.load_transcript(asr.transcript_path(media), cfg["asr"]["model"],
+                                                   channel) is not None
         reads += 0 if cached else 1
     explicit = getattr(args, "subtitles", None)
     if scan["use_subtitles"] and not explicit and find_external(media, cfg["languages"], _ignore_tags(cfg)) is None:
@@ -388,11 +434,18 @@ def _ignore_tags(cfg: dict) -> tuple[str, ...]:
     return tuple({tag, "clean"})
 
 
+def audio_sidecar(cfg: dict) -> bool:
+    return bool(cfg["output"].get("audio_sidecar", False))
+
+
 def in_place(cfg: dict) -> bool:
-    return bool(cfg["output"].get("in_place", False))
+    return bool(cfg["output"].get("in_place", False)) and not audio_sidecar(cfg)
 
 
 def resolve_output(media: Path, cfg: dict, args) -> Path:
+    if audio_sidecar(cfg):
+        lang = next((l for l in cfg["languages"] if len(l) == 3), "eng")
+        return audio_sidecar_path(media, clean_title(BeepSpec.from_config(cfg), cfg), lang)
     if in_place(cfg):
         return media.with_suffix(".mkv")
     if getattr(args, "output", None):
@@ -513,6 +566,14 @@ def render_file(media: Path, spans: list[Span], cfg: dict, args: argparse.Namesp
         return None
     if is_done(media, cfg, args) and not overwrite and not dry_run:
         raise UserError(f"{output.name} already rendered (use --overwrite)")
+    if audio_sidecar(cfg):
+        with tempfile.TemporaryDirectory(prefix="audio-censor-") as tmp:
+            prepare_clean_subtitles(media, info, cfg, args, output, Path(tmp), dry_run)
+        out = render_audio_sidecar(media, info, dialogue, spans, spec, cfg, output, dry_run=dry_run,
+                                   verbose=getattr(args, "verbose", False))
+        if not dry_run:
+            mark_rendered(media, out, cfg)
+        return out
     if in_place(cfg):
         already = any(is_clean_track(a) for a in info.of_type("audio"))
         if already and not overwrite and not dry_run:
@@ -557,7 +618,7 @@ def prepare_clean_subtitles(media: Path, info, cfg: dict, args, output: Path, wo
         eprint("  clean subtitles: no subtitles found, skipping")
         return None, ""
     lang = src.language
-    if in_place(cfg):   # beside the original: Movie.en.clean.srt, never Movie.en.srt
+    if in_place(cfg) or audio_sidecar(cfg):   # beside the original: Movie.en.clean.srt, never Movie.en.srt
         tag = (sub_cfg.get("standalone_suffix") or ".clean").strip(".")
         name = f"{media.stem}.{lang}.{tag}{src.path.suffix}" if lang else f"{media.stem}.{tag}{src.path.suffix}"
     else:
@@ -1088,6 +1149,8 @@ def add_render_options(p: argparse.ArgumentParser) -> None:
                    help="add the clean track to the original file (rewritten and verified, then swapped in) "
                         "instead of writing Movie.clean.mkv")
     o.add_argument("--backup", action="store_true", help="with --in-place, keep the original as Movie.orig.mkv")
+    o.add_argument("--audio-sidecar", action="store_true",
+                   help="write only the clean track, as a .mka file beside the film (Jellyfin; no remux)")
     o.add_argument("--replace-audio", action="store_true", help="drop the original audio tracks")
     o.add_argument("--no-default", action="store_true", help="do not mark the clean track as default")
     o.add_argument("--no-media-update", "--no-plex-select", dest="no_plex_select", action="store_true",

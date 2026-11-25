@@ -64,3 +64,22 @@ def test_own_clean_track_is_never_the_dialogue_source():
     info = MediaInfo(P("x.mkv"), 1.0, [a(0, "DTS 5.1", False), a(1, "Commentary", False), a(2, "Clean (muted)", True)])
     assert pick_audio_stream(info, ["eng"]).type_index == 0
     assert pick_audio_stream(info, ["eng"], requested=2).type_index == 2     # explicit choice still wins
+
+
+
+def test_unsure_language_detection_falls_back_to_the_assumed_language(monkeypatch, tmp_path):
+    from pathlib import Path as P
+    from types import SimpleNamespace
+    from audio_censor import asr, cli
+    from audio_censor.config import DEFAULTS, deep_merge
+    from audio_censor.media import MediaInfo, Stream
+    cfg = deep_merge(DEFAULTS, {})
+    dlg = Stream(index=0, type_index=0, codec_type="audio", codec_name="dts", language="", title="", default=True)
+    info = MediaInfo(P("x.mkv"), 6000.0, [dlg])
+    monkeypatch.setattr(asr, "available", lambda: True)
+    monkeypatch.setattr(asr, "detect_language", lambda *a, **k: ("nn", 0.41))
+    ok, lang, how = cli.decide_audio_language(P("x.mkv"), info, dlg, cfg, SimpleNamespace(), tmp_path)
+    assert ok and lang == "eng" and "unsure" in how
+    monkeypatch.setattr(asr, "detect_language", lambda *a, **k: ("fr", 0.93))
+    ok, lang, how = cli.decide_audio_language(P("x.mkv"), info, dlg, cfg, SimpleNamespace(), tmp_path)
+    assert not ok and lang == "fr"
