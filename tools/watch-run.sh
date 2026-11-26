@@ -17,7 +17,7 @@ BEGIN {
   width = ENVIRON["COLUMNS"] ? ENVIRON["COLUMNS"] - 1 : 150
   n = split(names, files, "\n"); for (k = 1; k <= n; k++) runof[files[k]] = k
   tagcol[1] = "\033[35m"; tagcol[2] = "\033[34m"; tagcol[3] = "\033[33m"; tagcol[4] = "\033[36m"
-  tag = ""
+  tag = ""; r = 1
 }
 # tail marks which file the next lines come from
 /^==> .* <==$/ {
@@ -33,10 +33,17 @@ BEGIN {
   if (line ~ /^[[:space:]]*$/) next
   if (brief && (progress || line !~ /^\[[0-9]+\/[0-9]+\]|^###|context: |^  (asr|subtitles|asr recheck|clean subtitles|jellyfin|plex):|^ +[0-9]+ +[0-9][0-9]:[0-9][0-9]:|file\(s\):|Traceback|[Ee]rror/)) next
   if (progress) {                                   # a progress update: overwrite in place
-    if (lasttag != tag && inplace) printf "\n"
-    printf "%s%s%s%s%s", clr, tag, dim, substr(line, 1, width - 4), off
-    lasttag = tag
-    inplace = 1; fflush(); next
+    # one status line at the bottom: the latest progress of each run, side by side
+    sub(/^[[:space:]]+/, "", line)
+    gsub(/  +/, " ", line)
+    if (match(line, /time=[0-9:.]+/)) {                 # ffmpeg: just the position and speed
+      t = substr(line, RSTART + 5, RLENGTH - 5); sub(/\.[0-9]+$/, "", t)
+      sp = match(line, /speed= *[0-9.]+x/) ? substr(line, RSTART, RLENGTH) : ""
+      gsub(/ /, "", sp)
+      line = "encoding " t " " sp
+    }
+    prog[r + 0] = line
+    showstatus(); fflush(); next
   }
   out = line
   if (line ~ /^\[[0-9]+\/[0-9]+\]/)        out = "\n" bold line off
@@ -50,8 +57,17 @@ BEGIN {
     out = "  " yellow "muted" off " " f[3] "  " f[5] "s  " f[7] " " w
   }
   else if (line ~ /^  (asr|subtitles|asr recheck|clean subtitles|jellyfin|plex):|file\(s\):/) out = cyan line off
-  if (out ~ /^\n/) { printf "%s\n", (inplace ? clr : ""); out = substr(out, 2) }
-  printf "%s%s%s\n", (inplace ? clr : ""), tag, out
-  lasttag = tag
-  inplace = 0; fflush()
+  if (out ~ /^\n/) { printf "%s\n", clr; out = substr(out, 2) }
+  printf "%s%s%s\n", clr, tag, out
+  # a finished step ends the progress of that run
+  if (line ~ /^\[[0-9]+\/[0-9]+\]|staging: copied|transcribed|encoding clean|wrote |file\(s\)/) delete prog[r + 0]
+  showstatus(); fflush()
+}
+function showstatus(   k, s, each, cnt) {
+  cnt = 0; for (k in prog) cnt++
+  if (!cnt) { printf "%s", clr; return }
+  each = int(width / cnt) - 1; s = ""
+  for (k = 1; k <= 4; k++) if (k in prog)
+    s = s (s == "" ? "" : " | ") (multi ? tagcol[k] "[" k "]" off " " : "") dim substr(prog[k], 1, each - 5) off
+  printf "%s%s", clr, s
 }'
