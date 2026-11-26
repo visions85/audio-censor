@@ -90,7 +90,10 @@ def is_clean_track(stream: Stream) -> bool:
 def build_command(media: Path, info: MediaInfo, dialogue: Stream, spans: list[Span], spec: BeepSpec,
                   cfg: dict, output: Path, script_path: Path,
                   clean_subs: Path | None = None, clean_subs_lang: str = "",
-                  drop_clean: bool = False) -> tuple[list[str], str]:
+                  drop_clean: bool = False, dub_delta: Path | None = None,
+                  clean_audio: Path | None = None) -> tuple[list[str], str]:
+    """`clean_audio`: the clean track already encoded (dubbed films, see render()); it is
+    copied in, with no filter graph."""
     out_cfg = cfg.get("output", {})
     keep_original = bool(out_cfg.get("keep_original", True))
     set_default = bool(out_cfg.get("set_default", True))
@@ -101,6 +104,15 @@ def build_command(media: Path, info: MediaInfo, dialogue: Stream, spans: list[Sp
         file_input = 1
         spec.file_duration = probe(spec.file).duration
         inputs += ["-i", str(spec.file)]
+    dub_input = None
+    if dub_delta is not None:
+        dub_input = len(inputs) // 2
+        inputs += ["-i", str(dub_delta)]
+
+    audio_input = None
+    if clean_audio is not None:
+        audio_input = len(inputs) // 2
+        inputs += ["-i", str(clean_audio)]
 
     subs_input = None
     if clean_subs is not None:
@@ -108,13 +120,16 @@ def build_command(media: Path, info: MediaInfo, dialogue: Stream, spans: list[Sp
         inputs += ["-i", str(clean_subs)]
 
     rate = dialogue.sample_rate or 48000
-    graph = build_filtergraph(spans, spec, audio_label=f"0:a:{dialogue.type_index}",
-                              layout=dialogue.channel_layout, channels=dialogue.channels or 2,
-                              rate=rate, file_input=file_input)
-    script_path.write_text(graph + "\n", encoding="utf-8")
-
-    cmd = ["ffmpeg", "-y", "-hide_banner", "-loglevel", "warning", "-stats", *inputs,
-           filter_script_option(), str(script_path)]
+    if audio_input is None:
+        graph = build_filtergraph(spans, spec, audio_label=f"0:a:{dialogue.type_index}",
+                                  layout=dialogue.channel_layout, channels=dialogue.channels or 2,
+                                  rate=rate, file_input=file_input, dub_input=dub_input)
+        script_path.write_text(graph + "\n", encoding="utf-8")
+        cmd = ["ffmpeg", "-y", "-hide_banner", "-loglevel", "warning", "-stats", *inputs,
+               filter_script_option(), str(script_path)]
+    else:
+        graph = f"(clean track copied from {clean_audio.name})"
+        cmd = ["ffmpeg", "-y", "-hide_banner", "-loglevel", "warning", "-stats", *inputs]
 
     audio_streams = [a for a in info.of_type("audio") if not (drop_clean and is_clean_track(a))]
     kept_audio = audio_streams if keep_original else []
@@ -122,7 +137,7 @@ def build_command(media: Path, info: MediaInfo, dialogue: Stream, spans: list[Sp
     cmd += ["-map", "0:v?"]
     for s in kept_audio:
         cmd += ["-map", f"0:a:{s.type_index}"]
-    cmd += ["-map", "[clean]"]
+    cmd += ["-map", f"{audio_input}:a:0" if audio_input is not None else "[clean]"]
     for x in kept_subs:
         cmd += ["-map", f"0:s:{x.type_index}"]
     if subs_input is not None:
@@ -135,12 +150,15 @@ def build_command(media: Path, info: MediaInfo, dialogue: Stream, spans: list[Sp
     for i in range(new_idx):
         cmd += [f"-c:a:{i}", "copy"]
     codec, bitrate = choose_codec(dialogue, cfg)
-    cmd += [f"-c:a:{new_idx}", codec]
-    if bitrate:
-        cmd += [f"-b:a:{new_idx}", bitrate]
-    if codec == "aac" and (dialogue.channels or 2) > 2:
-        cmd += [f"-ac:a:{new_idx}", str(dialogue.channels)]
-    cmd += _encoder_opts(codec, cfg, f":a:{new_idx}")
+    if audio_input is not None:
+        cmd += [f"-c:a:{new_idx}", "copy"]
+    else:
+        cmd += [f"-c:a:{new_idx}", codec]
+        if bitrate:
+            cmd += [f"-b:a:{new_idx}", bitrate]
+        if codec == "aac" and (dialogue.channels or 2) > 2:
+            cmd += [f"-ac:a:{new_idx}", str(dialogue.channels)]
+        cmd += _encoder_opts(codec, cfg, f":a:{new_idx}")
     cmd += [f"-metadata:s:a:{new_idx}", f"title={clean_title(spec, cfg)}"]
     if dialogue.language:
         cmd += [f"-metadata:s:a:{new_idx}", f"language={dialogue.language}"]
@@ -256,14 +274,24 @@ def finalize_in_place(media: Path, tmp: Path, expect_audio: int, expect_subs: in
 
 def render(media: Path, info: MediaInfo, dialogue: Stream, spans: list[Span], spec: BeepSpec, cfg: dict,
            output: Path, dry_run: bool = False, verbose: bool = False,
-           clean_subs: Path | None = None, clean_subs_lang: str = "", drop_clean: bool = False) -> Path:
+           clean_subs: Path | None = None, clean_subs_lang: str = "", drop_clean: bool = False,
+           dub_delta: Path | None = None) -> Path:
     if output.resolve() == media.resolve():
         raise MediaError("output path equals the input; refusing to overwrite the source")
     output.parent.mkdir(parents=True, exist_ok=True)
-    with tempfile.TemporaryDirectory(prefix="audio-censor-") as tmp:
+    # a dubbed film's clean track is encoded beside its change track (the dub work folder)
+    with tempfile.TemporaryDirectory(prefix="audio-censor-", dir=str(dub_delta.parent) if dub_delta else None) as tmp:
         script = Path(tmp) / "filter.txt"
+        clean_audio = None
+        if dub_delta is not None and not dry_run:
+            # A second audio input feeding the filter beside the video stalls ffmpeg's muxer
+            # a couple of minutes in, so a dubbed clean track is encoded on its own first
+            # and then copied in.
+            clean_audio = render_audio_sidecar(media, info, dialogue, spans, spec, cfg, Path(tmp) / "clean.mka",
+                                               verbose=verbose, dub_delta=dub_delta)
         cmd, graph = build_command(media, info, dialogue, spans, spec, cfg, output, script,
-                                   clean_subs=clean_subs, clean_subs_lang=clean_subs_lang, drop_clean=drop_clean)
+                                   clean_subs=clean_subs, clean_subs_lang=clean_subs_lang, drop_clean=drop_clean,
+                                   dub_delta=None if clean_audio else dub_delta, clean_audio=clean_audio)
         if verbose or dry_run:
             eprint("filter graph:\n" + graph)
             eprint("command:\n  " + " ".join(_quote(c) for c in cmd))
@@ -281,7 +309,8 @@ def audio_sidecar_path(media: Path, title: str, lang: str) -> Path:
 
 
 def render_audio_sidecar(media: Path, info: MediaInfo, dialogue: Stream, spans: list[Span], spec: BeepSpec,
-                         cfg: dict, output: Path, dry_run: bool = False, verbose: bool = False) -> Path:
+                         cfg: dict, output: Path, dry_run: bool = False, verbose: bool = False,
+                         dub_delta: Path | None = None) -> Path:
     """Encode just the clean track into its own file beside the film (no remux)."""
     inputs = ["-i", str(media)]
     file_input = None
@@ -289,10 +318,14 @@ def render_audio_sidecar(media: Path, info: MediaInfo, dialogue: Stream, spans: 
         file_input = 1
         spec.file_duration = probe(spec.file).duration
         inputs += ["-i", str(spec.file)]
+    dub_input = None
+    if dub_delta is not None:
+        dub_input = len(inputs) // 2
+        inputs += ["-i", str(dub_delta)]
     rate = dialogue.sample_rate or 48000
     graph = build_filtergraph(spans, spec, audio_label=f"0:a:{dialogue.type_index}",
                               layout=dialogue.channel_layout, channels=dialogue.channels or 2,
-                              rate=rate, file_input=file_input)
+                              rate=rate, file_input=file_input, dub_input=dub_input)
     codec, bitrate = choose_codec(dialogue, cfg)
     tmp_out = output.with_name(f".{output.stem}.partial.mka")
     with tempfile.TemporaryDirectory(prefix="audio-censor-") as tmp:

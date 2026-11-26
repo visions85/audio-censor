@@ -243,9 +243,13 @@ function rerenderBanner(path, needs) {
 function movieBody(d, path, needs) {
   const spans = d.spans || [], ctx = d.context || [];
   if (!spans.length && !ctx.length) return `<p class="muted">No scan yet. "Make clean version" scans the film and writes its clean audio.</p>`;
-  let html = rerenderBanner(path, needs) + `<h3>Muted (${spans.length})</h3>`;
+  // dubbed words (see dub.py): the replacement said in the actor's voice, by start time
+  const dubs = {}; for (const x of (d.dub || [])) if (x.said) dubs[x.start.toFixed(2)] = x.said;
+  const nDub = Object.keys(dubs).length;
+  let html = rerenderBanner(path, needs) + `<h3>Muted (${spans.length})${nDub ? ` · ${nDub} dubbed` : ""}</h3>`;
   html += spans.length ? `<table><thead><tr><th>Time</th><th class="num">Length</th><th>Word</th><th>Found by</th></tr></thead><tbody>` +
-    spans.map(s => `<tr><td>${fmt(s.start)}</td><td class="num">${(s.end - s.start).toFixed(1)} s</td><td>${esc((s.words || []).join(", "))}</td>
+    spans.map(s => `<tr><td>${fmt(s.start)}</td><td class="num">${(s.end - s.start).toFixed(1)} s</td><td>${esc((s.words || []).join(", "))}${
+      dubs[(+s.start).toFixed(2)] ? ` <span class="muted">→ said “${esc(dubs[(+s.start).toFixed(2)])}”</span>` : ""}</td>
       <td class="muted">${esc((s.sources || []).map(x => x === "asr" ? "speech" : "subtitles").join(" + "))}${s.estimated ? " (estimated)" : ""}</td></tr>`).join("") +
     `</tbody></table>` : `<p class="muted">Nothing needed muting.</p>`;
   if (ctx.length) {

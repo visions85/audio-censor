@@ -56,6 +56,18 @@ DEFAULTS: dict = {
         "workers": 2,                  # jobs at once (their scans still take turns on the GPU)
         "password": "",                # set one to require a login (user name ignored)
     },
+    "dub": {
+        # say a family word in the actor's voice instead of muting (see dub.py); needs a
+        # separate model environment with f5-tts and demucs: python = its Python
+        "enabled": False,
+        "python": "",
+        "cache": "",                  # where that environment keeps its model downloads
+        "steps": 32,
+        "seeds": [1, 2],
+        "cfg": [2.0, 3.0],            # takes per replacement = seeds x cfg
+        "min_prob": 0.5,              # Whisper must hear the new word at least this surely
+        "words": {},                  # word -> [replacements]; empty = the built-in table
+    },
     "context": {
         # words rude in only one sense, judged in context by a local AI (see context.py);
         # rules = [{words = ["balls", "nuts"], meaning = "testicles", fallback = [...]}]

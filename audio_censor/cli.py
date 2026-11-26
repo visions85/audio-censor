@@ -15,7 +15,7 @@ import time
 from importlib import resources
 from pathlib import Path
 
-from . import __version__, asr, edition, gpu, scenes, staging, thrash
+from . import __version__, asr, dub, edition, gpu, scenes, staging, thrash
 from .beep import BeepError, BeepSpec, WAVES
 from .config import default_config_path, load_config, write_template
 from .media import (VIDEO_EXTS, MediaError, eprint, has_center, is_own_clean_audio, language_matches,
@@ -476,7 +476,7 @@ def is_done(media: Path, cfg: dict, args, meta: dict | None = None) -> bool:
     return resolve_output(media, cfg, args).exists()
 
 
-def mark_rendered(media: Path, final: Path, cfg: dict) -> None:
+def mark_rendered(media: Path, final: Path, cfg: dict, dub_notes: list | None = None) -> None:
     """Record the render in the span file (status and the in-place skip rely on it)."""
     side = sidecar_path(media)
     if not side.exists():
@@ -487,6 +487,9 @@ def mark_rendered(media: Path, final: Path, cfg: dict) -> None:
     meta["rendered_at"] = time.strftime("%Y-%m-%dT%H:%M:%S")
     if in_place(cfg):
         meta["rendered_in_place"] = True
+    meta.pop("dub", None)
+    if dub_notes:
+        meta["dub"] = dub_notes            # which words were dubbed, and as what
     save_sidecar(side, media, spans, meta)
 
 
@@ -565,8 +568,42 @@ def render_subtitles_only(media: Path, cfg: dict, args, meta: dict) -> tuple[Pat
         return target, "written"
 
 
+def _dub(media: Path, info, dialogue, spans: list[Span], cfg: dict, args, work: Path):
+    """Dub what can be dubbed (see dub.py): (spans still to mute, change track or None, notes)."""
+    why = dub.available(cfg)
+    if why == "off" or not spans or getattr(args, "dry_run", False):
+        return spans, None, None
+    if why:
+        eprint(f"  dub: {why}; muting instead")
+        return spans, None, None
+    if not has_center(dialogue):
+        eprint("  dub: the dialogue track has no centre channel; muting instead")
+        return spans, None, None
+    words = asr.load_transcript(asr.transcript_path(media), cfg["asr"]["model"], _asr_channel(cfg, dialogue))
+    if not words:
+        eprint("  dub: no cached transcript with word timings; muting instead")
+        return spans, None, None
+    try:
+        with gpu.turn():
+            res = dub.prepare(media, dialogue.type_index, dialogue.sample_rate or 48000, info.duration,
+                              spans, words, cfg, work)
+    except (dub.DubError, MediaError, OSError) as exc:
+        eprint(f"  dub: {exc}; muting instead")
+        return spans, None, None
+    left = [s for i, s in enumerate(spans) if i not in res.dubbed]
+    if res.delta is not None:
+        eprint(f"  dub: {len(res.dubbed)} word(s) dubbed, {len(left)} muted")
+    return left, res.delta, res.notes
+
+
 def render_file(media: Path, spans: list[Span], cfg: dict, args: argparse.Namespace,
                 audio_track: int | None) -> Path | None:
+    with dub.work_dir(staging.stage_dir(cfg, args)) as work:
+        return _render_file(media, spans, cfg, args, audio_track, Path(work))
+
+
+def _render_file(media: Path, spans: list[Span], cfg: dict, args: argparse.Namespace,
+                 audio_track: int | None, dub_work: Path) -> Path | None:
     info = probe(media)
     dialogue = pick_audio_stream(info, cfg["languages"], audio_track)
     spec = BeepSpec.from_config(cfg)
@@ -579,12 +616,13 @@ def render_file(media: Path, spans: list[Span], cfg: dict, args: argparse.Namesp
     if is_done(media, cfg, args) and not overwrite and not dry_run:
         raise UserError(f"{output.name} already rendered (use --overwrite)")
     if audio_sidecar(cfg):
+        mute, delta, notes = _dub(media, info, dialogue, spans, cfg, args, dub_work)
         with tempfile.TemporaryDirectory(prefix="audio-censor-") as tmp:
-            prepare_clean_subtitles(media, info, cfg, args, output, Path(tmp), dry_run)
-        out = render_audio_sidecar(media, info, dialogue, spans, spec, cfg, output, dry_run=dry_run,
-                                   verbose=getattr(args, "verbose", False))
+            prepare_clean_subtitles(media, info, cfg, args, output, Path(tmp), dry_run, notes)
+        out = render_audio_sidecar(media, info, dialogue, mute, spec, cfg, output, dry_run=dry_run,
+                                   verbose=getattr(args, "verbose", False), dub_delta=delta)
         if not dry_run:
-            mark_rendered(media, out, cfg)
+            mark_rendered(media, out, cfg, notes)
         return out
     if in_place(cfg):
         already = any(is_clean_track(a) for a in info.of_type("audio"))
@@ -596,12 +634,13 @@ def render_file(media: Path, spans: list[Span], cfg: dict, args: argparse.Namesp
         eprint(f"  in place: rewriting {media.name}" + (", replacing its existing clean track" if already else ""))
     else:
         target = output
+    mute, delta, notes = _dub(media, info, dialogue, spans, cfg, args, dub_work)
     with tempfile.TemporaryDirectory(prefix="audio-censor-") as tmp:
-        clean_subs, lang = prepare_clean_subtitles(media, info, cfg, args, output, Path(tmp), dry_run)
+        clean_subs, lang = prepare_clean_subtitles(media, info, cfg, args, output, Path(tmp), dry_run, notes)
         try:
-            out = render(media, info, dialogue, spans, spec, cfg, target, dry_run=dry_run,
+            out = render(media, info, dialogue, mute, spec, cfg, target, dry_run=dry_run,
                          verbose=getattr(args, "verbose", False), clean_subs=clean_subs, clean_subs_lang=lang,
-                         drop_clean=in_place(cfg))
+                         drop_clean=in_place(cfg), dub_delta=delta)
         except BaseException:
             if in_place(cfg):
                 target.unlink(missing_ok=True)
@@ -613,12 +652,12 @@ def render_file(media: Path, spans: list[Span], cfg: dict, args: argparse.Namesp
                                 expect_subs=len(kept_subs) + (1 if clean_subs else 0),
                                 backup=bool(cfg["output"].get("backup", False)))
     if not dry_run:
-        mark_rendered(media, out, cfg)
+        mark_rendered(media, out, cfg, notes)
     return out
 
 
 def prepare_clean_subtitles(media: Path, info, cfg: dict, args, output: Path, work: Path,
-                            dry_run: bool) -> tuple[Path | None, str]:
+                            dry_run: bool, dub_notes: list | None = None) -> tuple[Path | None, str]:
     """Write censored subtitles (sidecar and/or temp file for embedding). Returns (path, language)."""
     sub_cfg = cfg["subtitles"]
     if not sub_cfg.get("clean", True) or not (sub_cfg.get("sidecar", True) or sub_cfg.get("embed", True)):
@@ -641,7 +680,8 @@ def prepare_clean_subtitles(media: Path, info, cfg: dict, args, output: Path, wo
         return (target if sub_cfg.get("embed", True) else None), lang
     count = write_clean_subtitles(src, Matcher.from_config(cfg), target,
                                   sub_cfg.get("style", "asterisks"), sub_cfg.get("replacement", "[BLEEP]"),
-                                  NameDetector.from_config(cfg))
+                                  NameDetector.from_config(cfg),
+                                  dubs=[(n["start"], n["word"], n["said"]) for n in (dub_notes or []) if n.get("said")])
     where = target.name if sub_cfg.get("sidecar", True) else "embedded only"
     eprint(f"  clean subtitles: {count} word(s) masked from {src.description} -> {where}")
     return (target if sub_cfg.get("embed", True) else None), lang

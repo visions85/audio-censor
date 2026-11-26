@@ -207,8 +207,26 @@ def _merge_ranges(ranges: list[tuple[int, int]]) -> list[tuple[int, int]]:
     return [(s, e) for s, e in merged]
 
 
+def _swap(found: str, swaps: list | None) -> str | None:
+    """The dubbed word for a masked one (see dub.py), keeping the original's capital letter.
+    `swaps` is this cue's [(word, said)], used up as they are placed."""
+    if not swaps:
+        return None
+    from .dub import norm
+    words = found.split()
+    for i, (w, said) in enumerate(swaps):
+        for k in range(len(words) - 1, -1, -1):
+            if norm(words[k]) == w:
+                swaps.pop(i)
+                tail = re.match(r"^(\W*)\w[\w']*(\W*)$", words[k])
+                new = said[0].upper() + said[1:] if words[k].lstrip("\"'(¿¡")[:1].isupper() else said
+                words[k] = f"{tail.group(1)}{new}{tail.group(2)}" if tail else new
+                return " ".join(words)
+    return None
+
+
 def _censor_plain(text: str, matcher: Matcher, style: str, replacement: str,
-                  detector: "NameDetector | None" = None) -> tuple[str, int]:
+                  detector: "NameDetector | None" = None, swaps: list | None = None) -> tuple[str, int]:
     tokens = tokenize(text)
     matches = matcher.find(tokens)
     if detector:
@@ -229,6 +247,9 @@ def _censor_plain(text: str, matcher: Matcher, style: str, replacement: str,
             elif s > 0 and text[s - 1] == " " and pos < s:
                 s -= 1
             out.append(text[pos:s])
+        elif (said := _swap(text[s:e], swaps)) is not None:
+            out.append(text[pos:s])
+            out.append(said)                 # dubbed in the clean audio: show what is said
         else:
             out.append(text[pos:s])
             if style == "asterisks":
@@ -246,7 +267,7 @@ def _censor_plain(text: str, matcher: Matcher, style: str, replacement: str,
 
 
 def censor_text(text: str, matcher: Matcher, style: str = "asterisks", replacement: str = "[BLEEP]",
-                detector: "NameDetector | None" = None) -> tuple[str, int]:
+                detector: "NameDetector | None" = None, swaps: list | None = None) -> tuple[str, int]:
     """Censor the visible words of an event's text, leaving tags and line breaks alone."""
     if style not in STYLES:
         raise ValueError(f"subtitle style must be one of {', '.join(STYLES)}")
@@ -255,33 +276,39 @@ def censor_text(text: str, matcher: Matcher, style: str = "asterisks", replaceme
         if not piece or _PIECE_RE.fullmatch(piece):
             out.append(piece)
             continue
-        new, n = _censor_plain(piece, matcher, style, replacement, detector)
+        new, n = _censor_plain(piece, matcher, style, replacement, detector, swaps)
         out.append(new)
         count += n
     return "".join(out), count
 
 
 def censor_subs(subs: pysubs2.SSAFile, matcher: Matcher, style: str, replacement: str,
-                detector: "NameDetector | None" = None) -> tuple[pysubs2.SSAFile, int]:
+                detector: "NameDetector | None" = None, dubs: list | None = None) -> tuple[pysubs2.SSAFile, int]:
+    """`dubs`: [(time, word, said)] of words the clean audio dubs; a cue showing one of
+    them gets the new word instead of a mask."""
+    from .dub import norm
     clean = copy.deepcopy(subs)
     total = 0
     for ev in clean.events:
         if ev.is_comment:
             continue
-        ev.text, n = censor_text(ev.text, matcher, style, replacement, detector)
+        swaps = [(norm(w), said) for t, w, said in (dubs or [])
+                 if ev.start / 1000 - 0.75 <= t <= ev.end / 1000 + 0.75]
+        ev.text, n = censor_text(ev.text, matcher, style, replacement, detector, swaps)
         total += n
     return clean, total
 
 
 def write_clean_subtitles(source: SubtitleSource, matcher: Matcher, out_path: Path,
-                          style: str, replacement: str, detector: "NameDetector | None" = None) -> int:
+                          style: str, replacement: str, detector: "NameDetector | None" = None,
+                          dubs: list | None = None) -> int:
     """Write a censored copy of `source` to out_path (format follows the extension)."""
     subs = load_subs(source.path)
     texts = [c.text for c in cues_from_subs(subs)]
     matcher.prepare(texts)
     if detector is not None:
         detector.learn(texts, matcher)
-    clean, count = censor_subs(subs, matcher, style, replacement, detector)
+    clean, count = censor_subs(subs, matcher, style, replacement, detector, dubs)
     if matcher.judge is not None:
         matcher.judge.release()
     out_path.parent.mkdir(parents=True, exist_ok=True)

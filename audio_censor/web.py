@@ -137,6 +137,7 @@ class Library:
         return {
             "spans": doc.get("spans", []),
             "context": doc.get("context", []),
+            "dub": doc.get("dub", []),
             "names": doc.get("names", []),
             "subtitles": doc.get("subtitles"),
             "asr": doc.get("asr"),

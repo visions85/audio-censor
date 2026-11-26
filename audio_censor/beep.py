@@ -197,10 +197,33 @@ def gate_chain(audio_label: str, spans: list[Span], level: float, layout: str, c
     ]
 
 
+def layout_names(layout: str, channels: int) -> list[str] | None:
+    return LAYOUT_CHANNELS.get(layout) or LAYOUT_CHANNELS.get(_DEFAULT_LAYOUT_FOR_CHANNELS.get(channels, ""))
+
+
+def dub_chain(audio_label: str, dub_input: int, layout: str, channels: int, out_label: str) -> str:
+    """Add the dub change track (front left, front right, centre: see dub.py) to the dialogue."""
+    names = layout_names(layout, channels)
+    if not names or not {"FL", "FR", "FC"} <= set(names):
+        raise BeepError(f"dubbing needs a centre channel; the dialogue track is {layout or channels}")
+    lay = layout if layout in LAYOUT_CHANNELS else _DEFAULT_LAYOUT_FOR_CHANNELS[channels]
+    extra = {"FL": channels, "FR": channels + 1, "FC": channels + 2}
+    pan = "|".join(f"{n}=c{i}" + (f"+c{extra[n]}" if n in extra else "") for i, n in enumerate(names))
+    return f"[{audio_label}][{dub_input}:a]amerge=inputs=2,pan={lay}|{pan}[{out_label}]"
+
+
 def build_filtergraph(spans: list[Span], spec: BeepSpec, *, audio_label: str, layout: str,
                       channels: int, rate: int, file_input: int | None = None,
-                      out_label: str = "clean") -> str:
-    """Full filter_complex script: gated dialogue mixed with positioned beeps -> [out_label]."""
+                      out_label: str = "clean", dub_input: int | None = None) -> str:
+    """Full filter_complex script: gated dialogue mixed with positioned beeps -> [out_label].
+    With `dub_input`, the dub change track is added first and `spans` are the words left
+    to mute."""
+    if dub_input is not None:
+        first = dub_chain(audio_label, dub_input, layout, channels, "dubbed")
+        if not spans:
+            return f"{first};\n[dubbed]anull[{out_label}]"
+        return first + ";\n" + build_filtergraph(spans, spec, audio_label="dubbed", layout=layout, channels=channels,
+                                                  rate=rate, file_input=file_input, out_label=out_label)
     if not spans:
         return f"[{audio_label}]anull[{out_label}]"
     if spec.mode in ("mute", "duck"):
