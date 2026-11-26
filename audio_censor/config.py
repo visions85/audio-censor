@@ -63,6 +63,11 @@ DEFAULTS: dict = {
         "url": "http://127.0.0.1:11434",   # Ollama
         "model": "gemma4:12b",
         "timeout": 120,
+        # when the AI cannot answer (Ollama down, a game running): "stop" ends the run
+        # before anything is written; "fallback" lets the fallback phrases decide
+        "when_down": "stop",
+        "retries": 3,
+        "retry_wait": 20,
         "rules": [],
     },
     "beep": {

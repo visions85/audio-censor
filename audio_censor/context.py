@@ -111,6 +111,11 @@ def _cache_path() -> Path:
     return Path(base) / "audio-censor" / "context.json"
 
 
+class ContextDown(RuntimeError):
+    """The AI cannot answer, and [context] when_down = "stop": end the run rather than
+    let the simpler fallback phrases decide a film's mutes unseen."""
+
+
 class ContextJudge:
     def __init__(self, cfg: dict):
         ccfg = cfg.get("context", {})
@@ -120,6 +125,10 @@ class ContextJudge:
         self.model = ccfg.get("model", "gemma4:12b")
         self.enabled = bool(ccfg.get("enabled", True))
         self.timeout = float(ccfg.get("timeout", 120))
+        # "stop": end the run when the AI cannot answer; "fallback": use the fallback phrases
+        self.when_down = str(ccfg.get("when_down", "stop")).lower()
+        self.retries = int(ccfg.get("retries", 3))
+        self.retry_wait = float(ccfg.get("retry_wait", 20))
         self.lines: list[list[str]] = []      # prepared document: words of each subtitle line
         self.captions: list[list[bool]] = []  # per word: inside a [sound caption]
         self.in_caption = False
@@ -212,6 +221,10 @@ class ContextJudge:
         for question in dict.fromkeys(questions):
             answer, source = self._judge(question, rule)
             if answer is None:
+                if self.when_down != "fallback":
+                    raise ContextDown(f"{self._down or 'the AI did not answer'}; stopping so the fallback "
+                                      "phrases do not decide this film (start Ollama and run again, or set "
+                                      '[context] when_down = "fallback")')
                 yes, how = self._fallback(words, i, j, rule), "fallback phrases"
                 break
             if source != "cached":
@@ -298,7 +311,8 @@ class ContextJudge:
         game = find_game()
         if game:
             self._down = f"{game} is running"
-            eprint(f"  context: {self._down}; using the fallback phrases instead of {self.model}")
+            eprint(f"  context: {self._down}"
+                   + (f"; using the fallback phrases instead of {self.model}" if self.when_down == "fallback" else ""))
             return None
         body = {"model": self.model, "stream": False, "think": False, "keep_alive": "2m",
                 "messages": [{"role": "system", "content": self.prompt(rule)},
@@ -306,13 +320,22 @@ class ContextJudge:
                 "options": {"temperature": 0, "num_predict": 3, "num_ctx": 4096}}
         req = urllib.request.Request(self.url + "/api/chat", data=json.dumps(body).encode(),
                                      headers={"Content-Type": "application/json"})
-        try:
-            with urllib.request.urlopen(req, timeout=self.timeout) as r:
-                reply = json.load(r)["message"]["content"].strip().lower()
-        except (urllib.error.URLError, OSError, ValueError, KeyError) as exc:
-            self._down = f"Ollama at {self.url} did not answer ({exc})"
-            eprint(f"  context: {self._down}; using the fallback phrases")
-            return None
+        import time
+        for attempt in range(self.retries + 1):
+            try:
+                with urllib.request.urlopen(req, timeout=self.timeout) as r:
+                    reply = json.load(r)["message"]["content"].strip().lower()
+                break
+            except (urllib.error.URLError, OSError, ValueError, KeyError) as exc:
+                if attempt < self.retries:             # a restart of Ollama takes a few seconds
+                    eprint(f"  context: Ollama at {self.url} did not answer ({exc}); "
+                           f"trying again in {self.retry_wait:.0f} s")
+                    time.sleep(self.retry_wait)
+                    continue
+                self._down = f"Ollama at {self.url} did not answer ({exc})"
+                eprint(f"  context: {self._down}"
+                       + ("; using the fallback phrases" if self.when_down == "fallback" else ""))
+                return None
         self._used = True
         yes = reply.lstrip("*( ").startswith("yes")
         return not yes if rule.unsure_mute else yes

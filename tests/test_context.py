@@ -8,8 +8,8 @@ from audio_censor.wordlist import Matcher, tokenize
 RULE = {"words": ["balls", "nuts"], "meaning": "testicles", "fallback": ["bust* * balls", "in the nuts"]}
 
 
-def _matcher(monkeypatch, answers=None, down=False):
-    cfg = deep_merge(load_config(), {"context": {"rules": [RULE]}})
+def _matcher(monkeypatch, answers=None, down=False, when_down="stop"):
+    cfg = deep_merge(load_config(), {"context": {"rules": [RULE], "when_down": when_down}})
     asked = []
 
     def fake_ask(self, text, meaning):
@@ -44,8 +44,33 @@ def test_answers_are_cached_and_subtitles_ask_the_same_question(monkeypatch):
     assert list(cached.values()) == [True]
 
 
-def test_fallback_phrases_when_the_model_is_unavailable(monkeypatch):
+def test_a_run_stops_when_the_model_is_unavailable(monkeypatch):
+    import pytest
     m, _ = _matcher(monkeypatch, down=True)
+    m.prepare(["you busted my balls"])
+    with pytest.raises(context.ContextDown):
+        m.find(tokenize("you busted my balls"))
+    m.prepare(["throw me the ball"])                       # no judged word: nothing to ask
+    assert m.find(tokenize("throw me the ball")) == []
+
+
+def test_ollama_is_retried_before_giving_up(monkeypatch):
+    import urllib.request
+    judge = context.ContextJudge(deep_merge(load_config(), {"context": {"retries": 2, "retry_wait": 0}}))
+    monkeypatch.setattr(context, "find_game", lambda: None)
+    calls = []
+
+    def refuse(*a, **k):
+        calls.append(1)
+        raise OSError("connection refused")
+    monkeypatch.setattr(urllib.request, "urlopen", refuse)
+    from audio_censor.wordlist import ContextRule
+    assert judge._ask("x", ContextRule(patterns=[], meaning="testicles", fallback=[])) is None
+    assert len(calls) == 3 and "did not answer" in judge._down
+
+
+def test_fallback_phrases_when_the_model_is_unavailable(monkeypatch):
+    m, _ = _matcher(monkeypatch, down=True, when_down="fallback")
     for line, expect in (("you busted my balls", ["balls"]), ("kicked him in the nuts", ["nuts"]),
                          ("are you nuts", [])):
         m.prepare([line])

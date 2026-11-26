@@ -660,8 +660,9 @@ def _batch_guard(files: list[Path], args, counts: dict, media: Path, exc: Except
     Any exception counts: a crash inside a library on one odd file must not end a
     5000-file overnight run. -v prints the traceback.
     """
-    if getattr(args, "stop_on_error", False) or not _is_batch(args, files):
-        raise exc
+    from .context import ContextDown
+    if getattr(args, "stop_on_error", False) or not _is_batch(args, files) or isinstance(exc, ContextDown):
+        raise exc                       # the AI being down would fail every film after this one
     counts["failed"] += 1
     known = isinstance(exc, (MediaError, BeepError, UserError, RuntimeError, OSError))
     eprint(f"error: {media.name}: {exc if known else f'{type(exc).__name__}: {exc}'}")
