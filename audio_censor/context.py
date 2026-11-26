@@ -100,6 +100,12 @@ def parse_phrase(phrase: str) -> tuple[list[str], int, int]:
     return b + w + a, len(b), len(b) + len(w)
 
 
+def anchors(phrase: str) -> tuple[bool, bool]:
+    """'^[[nuts]]$': the correction applies only where the line starts (^) / ends ($) with it."""
+    t = phrase.strip()
+    return t.startswith("^"), t.endswith("$")
+
+
 def _cache_path() -> Path:
     base = os.environ.get("XDG_CACHE_HOME") or str(Path.home() / ".cache")
     return Path(base) / "audio-censor" / "context.json"
@@ -115,6 +121,9 @@ class ContextJudge:
         self.enabled = bool(ccfg.get("enabled", True))
         self.timeout = float(ccfg.get("timeout", 120))
         self.lines: list[list[str]] = []      # prepared document: words of each subtitle line
+        self.captions: list[list[bool]] = []  # per word: inside a [sound caption]
+        self.in_caption = False
+        self.cur = None
         self._index: dict[str, int] = {}
         self._cache: dict[str, bool] | None = None
         self._down: str | None = None          # why the model cannot be used this run
@@ -124,7 +133,8 @@ class ContextJudge:
         self.corrections = []
         for c in load_corrections():
             try:
-                self.corrections.append((*parse_phrase(c["phrase"]), bool(c.get("mute")), c["phrase"]))
+                self.corrections.append((*parse_phrase(c["phrase"]), bool(c.get("mute")), c["phrase"],
+                                         *anchors(c["phrase"])))
             except ValueError:
                 continue
 
@@ -132,8 +142,15 @@ class ContextJudge:
 
     def prepare(self, texts: list[str]) -> None:
         """Remember a film's subtitle lines, so a word in one of them is judged with its neighbours."""
+        import re
         from .wordlist import tokenize
-        self.lines = [[t.text for t in tokenize(x)] for x in texts]
+        self.lines, self.captions = [], []
+        for x in texts:
+            toks = tokenize(x)
+            # [BANGING], (door slams): a caption of a sound, not something anyone says
+            spans = [(m.start(), m.end()) for m in re.finditer(r"\[[^\]]*\]|\([^)]*\)|♪[^♪]*♪?", x)]
+            self.lines.append([t.text for t in toks])
+            self.captions.append([any(a <= t.start < b for a, b in spans) for t in toks])
         self.history = []
         self._told = set()
         self._index = {}
@@ -159,6 +176,12 @@ class ContextJudge:
             full = self.lines[line]
             off = next((k for k in range(len(full) - len(words) + 1) if full[k:k + len(words)] == words), 0)
             i, j, words = i + off, j + off, full
+            flags = self.captions[line] if line < len(self.captions) else []
+            self.in_caption = bool(flags[i:j]) and all(flags[i:j])
+            self.cur = (full, i, j)          # the whole subtitle line, for ^ / $ corrections
+        else:
+            self.in_caption = False
+            self.cur = None
         marked = words[:i] + ["[[" + " ".join(words[i:j]) + "]]"] + words[j:]
         if line is not None:
             before = [" ".join(w) for w in self.lines[max(0, line - 3):line]]
@@ -174,6 +197,8 @@ class ContextJudge:
 
     def accept(self, words: list[str], i: int, j: int, rule) -> bool:
         text, shown = self.context(words, i, j)
+        if self.in_caption:
+            return self._note(words, i, j, shown, False, "sound caption")
         fixed = self._corrected(words, i, j)
         if fixed is not None:
             return self._note(words, i, j, shown, fixed, "your correction")
@@ -206,14 +231,20 @@ class ContextJudge:
         return yes
 
     def _corrected(self, words: list[str], i: int, j: int) -> bool | None:
-        """Your answer for this use of the word, when a correction's phrase surrounds it."""
-        for cw, cs, ce, mute, _ in reversed(self.corrections):       # newest wins
-            if ce - cs != j - i or words[i:j] != cw[cs:ce]:
+        """Your answer for this use of the word, when a correction's phrase surrounds it.
+        When corrections disagree ("wants to [[come]] in" keep, "[[come]] in her" mute),
+        mute wins: a family filter errs toward silence."""
+        found = set()
+        for cw, cs, ce, mute, _, start, end in self.corrections:
+            w, a, b = (self.cur if (start or end) and getattr(self, "cur", None) else (words, i, j))
+            if (start or end) and not getattr(self, "cur", None):
+                continue                    # a line-anchored correction needs a subtitle line
+            if ce - cs != b - a or w[a:b] != cw[cs:ce]:
                 continue
-            lo = i - cs
-            if lo >= 0 and words[lo:lo + len(cw)] == cw:
-                return mute
-        return None
+            lo = a - cs
+            if lo >= 0 and w[lo:lo + len(cw)] == cw and (not start or lo == 0) and (not end or lo + len(cw) == len(w)):
+                found.add(mute)
+        return (True in found) if found else None
 
     def _judge(self, text: str, rule) -> tuple[bool | None, str]:
         key = hashlib.sha1(f"{self.model}\0{self.prompt(rule)}\0{text}".encode()).hexdigest()
@@ -248,7 +279,7 @@ class ContextJudge:
         """Your corrections for this rule's words, as worked examples (newest first)."""
         from .wordlist import Matcher
         shots = []
-        for cw, cs, ce, mute, phrase in reversed(self.corrections):
+        for cw, cs, ce, mute, phrase, *_ in reversed(self.corrections):
             if not any(len(p) == ce - cs and Matcher._try(p, cw, cs) for p in rule.patterns):
                 continue
             answer = ("no" if mute else "yes") if rule.unsure_mute else ("yes" if mute else "no")

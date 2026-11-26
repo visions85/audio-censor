@@ -1,0 +1,435 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Clean Library</title>
+<style>
+:root {
+  --bg: #f6f5f2; --panel: #ffffff; --ink: #1d1f23; --muted: #6a6f78; --line: #e2e0da;
+  --accent: #2f6f5e; --accent-ink: #ffffff; --warn: #a4471f; --ok: #2f6f5e; --pend: #8a6d1a; --chip: #efede8;
+  --shadow: 0 1px 2px rgba(0,0,0,.06), 0 4px 16px rgba(0,0,0,.05);
+}
+@media (prefers-color-scheme: dark) { :root:not([data-theme="light"]) {
+  --bg: #15171a; --panel: #1d2024; --ink: #e8e6e1; --muted: #9aa0a8; --line: #2c3036;
+  --accent: #6cbfa6; --accent-ink: #0e1512; --warn: #e3875f; --ok: #6cbfa6; --pend: #d9b85c; --chip: #262a2f;
+  --shadow: 0 1px 2px rgba(0,0,0,.3), 0 4px 16px rgba(0,0,0,.25);
+}}
+:root[data-theme="dark"] {
+  --bg: #15171a; --panel: #1d2024; --ink: #e8e6e1; --muted: #9aa0a8; --line: #2c3036;
+  --accent: #6cbfa6; --accent-ink: #0e1512; --warn: #e3875f; --ok: #6cbfa6; --pend: #d9b85c; --chip: #262a2f;
+}
+* { box-sizing: border-box; }
+body { margin: 0; background: var(--bg); color: var(--ink); font: 15px/1.45 system-ui, -apple-system, "Segoe UI", sans-serif; }
+header { position: sticky; top: 0; z-index: 5; background: var(--bg); border-bottom: 1px solid var(--line); }
+.bar { max-width: 1200px; margin: 0 auto; padding: 12px 16px; display: flex; gap: 12px; align-items: center; flex-wrap: wrap; }
+h1 { font-size: 17px; margin: 0 8px 0 0; letter-spacing: .2px; }
+nav { display: flex; gap: 4px; }
+nav button { background: none; border: 0; color: var(--muted); padding: 6px 10px; border-radius: 8px; font: inherit; cursor: pointer; }
+nav button.on { background: var(--chip); color: var(--ink); }
+.count { display: inline-block; min-width: 18px; padding: 0 5px; margin-left: 4px; border-radius: 9px; background: var(--accent); color: var(--accent-ink); font-size: 12px; text-align: center; }
+main { max-width: 1200px; margin: 0 auto; padding: 16px; }
+input[type=search], select { font: inherit; color: var(--ink); background: var(--panel); border: 1px solid var(--line); border-radius: 8px; padding: 7px 10px; }
+input[type=search] { flex: 1; min-width: 180px; }
+.grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(150px, 1fr)); gap: 16px; }
+.card { background: var(--panel); border-radius: 10px; overflow: hidden; box-shadow: var(--shadow); cursor: pointer; display: flex; flex-direction: column; }
+.card img, .poster-ph { width: 100%; aspect-ratio: 2/3; object-fit: cover; background: var(--chip); display: block; }
+.card .t { padding: 8px 10px 10px; }
+.card .n { font-weight: 600; font-size: 14px; line-height: 1.25; }
+.card .y { color: var(--muted); font-size: 12px; margin-top: 2px; }
+.badge { display: inline-block; font-size: 12px; padding: 1px 8px; border-radius: 10px; margin-top: 6px; background: var(--chip); color: var(--muted); white-space: nowrap; }
+.badge.clean, .badge.nothing { background: color-mix(in srgb, var(--ok) 18%, transparent); color: var(--ok); }
+.badge.partial, .badge.scanned, .badge.queued, .badge.running { background: color-mix(in srgb, var(--pend) 20%, transparent); color: var(--pend); }
+.badge.failed, .badge.missing { background: color-mix(in srgb, var(--warn) 18%, transparent); color: var(--warn); }
+.muted { color: var(--muted); }
+.empty { color: var(--muted); padding: 40px 0; text-align: center; }
+button.primary { background: var(--accent); color: var(--accent-ink); border: 0; border-radius: 8px; padding: 8px 14px; font: inherit; font-weight: 600; cursor: pointer; }
+button.ghost { background: none; color: var(--ink); border: 1px solid var(--line); border-radius: 8px; padding: 6px 12px; font: inherit; cursor: pointer; }
+button:disabled { opacity: .5; cursor: default; }
+/* detail */
+dialog { border: 0; border-radius: 14px; padding: 0; width: min(920px, calc(100vw - 32px)); max-height: calc(100vh - 32px); background: var(--panel); color: var(--ink); box-shadow: 0 10px 40px rgba(0,0,0,.35); }
+dialog::backdrop { background: rgba(0,0,0,.45); }
+.dhead { display: flex; gap: 18px; padding: 18px; border-bottom: 1px solid var(--line); }
+.dhead img { width: 120px; border-radius: 8px; aspect-ratio: 2/3; object-fit: cover; background: var(--chip); flex: none; }
+.dhead h2 { margin: 0 0 4px; font-size: 20px; }
+.dbody { padding: 0 18px 18px; overflow: auto; max-height: calc(100vh - 260px); }
+.actions { display: flex; gap: 8px; align-items: center; flex-wrap: wrap; margin-top: 12px; }
+.close { margin-left: auto; align-self: flex-start; }
+h3 { font-size: 15px; margin: 18px 0 8px; }
+table { width: 100%; border-collapse: collapse; font-size: 13.5px; }
+th, td { text-align: left; padding: 5px 8px; border-bottom: 1px solid var(--line); vertical-align: top; }
+th { color: var(--muted); font-weight: 500; }
+td.num, th.num { text-align: right; font-variant-numeric: tabular-nums; }
+.mute { color: var(--warn); font-weight: 600; }
+.keep { color: var(--ok); font-weight: 600; }
+mark { background: color-mix(in srgb, var(--warn) 25%, transparent); color: inherit; border-radius: 3px; padding: 0 2px; }
+details.season { border: 1px solid var(--line); border-radius: 10px; margin: 8px 0; }
+details.season summary { padding: 8px 12px; cursor: pointer; display: flex; gap: 10px; align-items: center; }
+details.season .eps { padding: 0 12px 10px; }
+.ep { display: flex; gap: 10px; align-items: center; padding: 4px 0; border-top: 1px solid var(--line); }
+.ep .en { flex: 1; cursor: pointer; }
+.ep .epd { width: 100%; }
+/* jobs, stats */
+.list { display: flex; flex-direction: column; gap: 10px; }
+.job { background: var(--panel); border-radius: 10px; padding: 12px 14px; box-shadow: var(--shadow); display: flex; gap: 12px; align-items: center; }
+.job .jt { flex: 1; min-width: 0; }
+.job .jp { color: var(--muted); font-size: 13px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; font-family: ui-monospace, monospace; }
+.tiles { display: grid; grid-template-columns: repeat(auto-fit, minmax(170px, 1fr)); gap: 12px; margin-bottom: 20px; }
+.tile { background: var(--panel); border-radius: 10px; padding: 14px; box-shadow: var(--shadow); }
+.tile .v { font-size: 26px; font-weight: 650; font-variant-numeric: tabular-nums; }
+.tile .l { color: var(--muted); font-size: 13px; }
+.cols { display: grid; grid-template-columns: 1fr 1fr; gap: 20px; }
+@media (max-width: 760px) { .cols { grid-template-columns: 1fr; } .dhead img { width: 80px; } }
+.panel { background: var(--panel); border-radius: 10px; padding: 14px; box-shadow: var(--shadow); }
+.barrow { display: grid; grid-template-columns: 130px 1fr 44px; gap: 8px; align-items: center; font-size: 13.5px; padding: 3px 0; }
+.barrow .b { height: 10px; border-radius: 5px; background: var(--accent); min-width: 2px; }
+.barrow .w { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.filters { display: flex; gap: 8px; flex-wrap: wrap; align-items: center; margin: 0 0 10px; }
+.filters input[type=search] { flex: 1 1 220px; }
+.filters select { flex: 0 1 auto; }
+@media (max-width: 760px) { .filters select, .filters button { flex: 1 1 45%; } }
+button.small { padding: 2px 8px; font-size: 12.5px; white-space: nowrap; }
+.rerender { display: flex; gap: 12px; align-items: center; flex-wrap: wrap; margin-top: 14px; padding: 10px 12px; border-radius: 10px;
+  background: color-mix(in srgb, var(--pend) 16%, transparent); }
+.rerender span { flex: 1; }
+.rerender[hidden] { display: none; }
+.toast { position: fixed; bottom: 18px; left: 50%; transform: translateX(-50%); background: var(--ink); color: var(--bg); padding: 9px 16px; border-radius: 9px; opacity: 0; transition: opacity .2s; pointer-events: none; z-index: 20; }
+.toast.on { opacity: 1; }
+</style>
+</head>
+<body>
+<header><div class="bar">
+  <h1>Clean Library</h1>
+  <nav>
+    <button data-tab="search" class="on">Search</button>
+    <button data-tab="library">Cleaned</button>
+    <button data-tab="jobs">Jobs<span class="count" id="jobcount" hidden></span></button>
+    <button data-tab="stats">Stats</button>
+  </nav>
+  <input type="search" id="q" placeholder="Search movies and shows" autocomplete="off">
+  <select id="kind"><option value="all">Movies &amp; shows</option><option value="movie">Movies</option><option value="series">Shows</option></select>
+</div></header>
+<main>
+  <section id="tab-search"><div class="grid" id="results"></div><div class="empty" id="noresults" hidden>Nothing found.</div></section>
+  <section id="tab-library" hidden>
+    <div class="filters">
+      <input type="search" id="libfilter" placeholder="Title, file or muted word">
+      <select id="f-kind"><option value="">Movies &amp; episodes</option><option value="movie">Movies</option><option value="episode">Episodes</option></select>
+      <select id="f-state"><option value="cleaned">Clean (incl. nothing to mute)</option><option value="clean">Clean, with mutes</option>
+        <option value="nothing">Nothing to mute</option><option value="scanned">Scanned, not cleaned</option><option value="foreign">Not English</option><option value="rerender">Needs re-render (corrected)</option><option value="">Any status</option></select>
+      <select id="f-lib"><option value="">All libraries</option></select>
+      <select id="f-where"><option value="">Audio anywhere</option><option value="beside">Beside the file</option><option value="in file">Inside the file</option></select>
+      <select id="f-mutes"><option value="0">Any number of mutes</option><option value="1">1 or more</option><option value="10">10 or more</option><option value="25">25 or more</option><option value="50">50 or more</option></select>
+      <select id="f-sort"><option value="title">Sort: title</option><option value="mutes">Sort: most mutes</option><option value="recent">Sort: recently scanned</option><option value="estimated">Sort: most estimated mutes</option></select>
+      <button class="ghost" id="f-reset">Reset</button>
+      <button class="ghost" id="reindex">Rescan library</button>
+    </div>
+    <div class="muted" id="libcount" style="margin:0 0 8px;font-size:13px"></div>
+    <div class="panel"><table><thead><tr><th>Title</th><th>Library</th><th>Status</th><th class="num">Mutes</th><th>Scanned</th></tr></thead><tbody id="libtable"></tbody></table></div>
+  </section>
+  <section id="tab-jobs" hidden>
+    <div class="actions" style="margin:0 0 12px"><button class="ghost" id="clearjobs">Clear finished</button></div>
+    <div class="list" id="joblist"></div>
+  </section>
+  <section id="tab-stats" hidden><div id="statsbody"></div></section>
+</main>
+<dialog id="detail"></dialog>
+<div class="toast" id="toast"></div>
+<script>
+const $ = s => document.querySelector(s);
+const esc = s => String(s ?? "").replace(/[&<>"']/g, c => ({"&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;","'":"&#39;"}[c]));
+const api = async (path, body) => {
+  const r = await fetch(path, body ? {method: "POST", headers: {"Content-Type": "application/json"}, body: JSON.stringify(body)} : {});
+  const data = await r.json().catch(() => ({}));
+  if (!r.ok) throw new Error(data.error || r.statusText);
+  return data;
+};
+const toast = msg => { const t = $("#toast"); t.textContent = msg; t.classList.add("on"); clearTimeout(t._h); t._h = setTimeout(() => t.classList.remove("on"), 3200); };
+const fmt = s => { s = Math.max(0, +s || 0); const h = Math.floor(s / 3600), m = Math.floor(s % 3600 / 60), x = Math.floor(s % 60);
+  return (h ? h + ":" + String(m).padStart(2, "0") : m) + ":" + String(x).padStart(2, "0"); };
+const LABEL = {clean: "Clean", nothing: "Nothing to mute", partial: "Partly clean", scanned: "Scanned, not cleaned",
+  foreign: "Not English", none: "Not cleaned", missing: "File not found", queued: "Queued", running: "Working…"};
+function badge(st) {
+  if (!st) return "";
+  let txt = LABEL[st.state] || st.state;
+  if (st.episodes !== undefined) txt = st.state === "none" ? `${st.episodes} episodes` : `${st.clean}/${st.episodes} clean`;
+  else if (st.state === "clean" && st.mutes !== undefined) txt += ` · ${st.mutes} mute${st.mutes === 1 ? "" : "s"}`;
+  return `<span class="badge ${st.state}">${esc(txt)}</span>`;
+}
+
+// tabs
+let tab = "search";
+document.querySelectorAll("nav button").forEach(b => b.onclick = () => show(b.dataset.tab));
+function show(name) {
+  tab = name;
+  document.querySelectorAll("nav button").forEach(b => b.classList.toggle("on", b.dataset.tab === name));
+  for (const t of ["search", "library", "jobs", "stats"]) $("#tab-" + t).hidden = t !== name;
+  if (name === "library") loadLibrary();
+  if (name === "jobs") loadJobs();
+  if (name === "stats") loadStats();
+}
+
+// search
+let searchSeq = 0, searchTimer;
+async function search() {
+  const seq = ++searchSeq, q = $("#q").value.trim(), kind = $("#kind").value;
+  try {
+    const items = await api(`/api/search?q=${encodeURIComponent(q)}&type=${kind}`);
+    if (seq !== searchSeq) return;
+    $("#noresults").hidden = items.length > 0;
+    $("#results").innerHTML = items.map(it => `
+      <div class="card" data-id="${it.id}">
+        <img loading="lazy" src="/img?id=${it.id}" alt="" onerror="this.replaceWith(Object.assign(document.createElement('div'),{className:'poster-ph'}))">
+        <div class="t"><div class="n">${esc(it.name)}</div>
+        <div class="y">${esc(it.year || "")} · ${it.type === "Series" ? "Show" : "Movie"}${it.library ? " · " + esc(it.library) : ""}</div>
+        ${badge(it.status)}</div></div>`).join("");
+    document.querySelectorAll(".card").forEach(c => c.onclick = () => openItem(c.dataset.id));
+  } catch (e) { toast(e.message); }
+}
+$("#q").oninput = () => { clearTimeout(searchTimer); searchTimer = setTimeout(() => { show("search"); search(); }, 300); };
+$("#kind").onchange = () => { show("search"); search(); };
+
+// detail
+const dlg = $("#detail");
+let current = null;
+async function openItem(id) {
+  dlg.innerHTML = `<div class="dhead"><div>Loading…</div></div>`;
+  dlg.showModal();
+  try { current = await api(`/api/item?id=${id}`); renderItem(); }
+  catch (e) { dlg.innerHTML = `<div class="dhead"><div>${esc(e.message)}</div><button class="ghost close" onclick="detail.close()">Close</button></div>`; }
+}
+function modeSelect() {
+  return `<select id="mode" title="Where the clean audio goes">
+    <option value="beside">Clean audio beside the file (Jellyfin)</option>
+    <option value="in file">Clean audio inside the file (Plex + Jellyfin)</option></select>`;
+}
+function renderItem() {
+  const it = current, isMovie = it.type === "Movie";
+  const st = it.status || {};
+  const cleaned = isMovie && ["clean", "nothing"].includes(st.state);
+  dlg.innerHTML = `
+    <div class="dhead">
+      <img src="/img?id=${it.id}" alt="">
+      <div style="flex:1;min-width:0">
+        <h2>${esc(it.name)} <span class="muted" style="font-weight:400">${esc(it.year || "")}</span></h2>
+        <div class="muted">${isMovie ? "Movie" : "Show"}${it.rating ? " · " + esc(it.rating) : ""}</div>
+        ${isMovie ? badge(st) : ""}
+        <p class="muted" style="margin:8px 0 0;max-height:4.4em;overflow:hidden">${esc(it.overview || "")}</p>
+        <div class="actions">
+          ${modeSelect()}
+          ${isMovie ? `<button class="primary" id="go">${cleaned ? "Redo clean version" : "Make clean version"}</button>`
+                    : `<button class="primary" id="go">Clean selected episodes</button><button class="ghost" id="goall">Clean whole show</button>`}
+        </div>
+      </div>
+      <button class="ghost close" onclick="detail.close()">Close</button>
+    </div>
+    <div class="dbody">${isMovie ? movieBody(it.details || {}, it.local, it.needs_rerender) : seriesBody(it)}</div>`;
+  $("#go").onclick = () => isMovie ? clean({id: it.id, redo: cleaned}) : cleanEpisodes(false);
+  if (!isMovie) {
+    $("#goall").onclick = () => cleanEpisodes(true);
+    dlg.querySelectorAll("input.seasonall").forEach(cb => cb.onchange = () =>
+      cb.closest("details").querySelectorAll("input.epcb").forEach(x => x.checked = cb.checked));
+    dlg.querySelectorAll(".en").forEach(el => el.onclick = () => toggleEpisode(el));
+  }
+}
+function marked(line) {
+  return esc(line).replace(/\[\[(.+?)\]\]/g, "<mark>$1</mark>");
+}
+function rerenderBanner(path, needs) {
+  return `<div class="rerender" data-path="${esc(path || "")}" ${needs ? "" : "hidden"}>
+    <span>Corrected since this clean version was made. Re-render to apply.</span>
+    <button class="primary" onclick="rerender(this)">Re-render now</button></div>`;
+}
+function movieBody(d, path, needs) {
+  const spans = d.spans || [], ctx = d.context || [];
+  if (!spans.length && !ctx.length) return `<p class="muted">No scan yet. "Make clean version" scans the film and writes its clean audio.</p>`;
+  let html = rerenderBanner(path, needs) + `<h3>Muted (${spans.length})</h3>`;
+  html += spans.length ? `<table><thead><tr><th>Time</th><th class="num">Length</th><th>Word</th><th>Found by</th></tr></thead><tbody>` +
+    spans.map(s => `<tr><td>${fmt(s.start)}</td><td class="num">${(s.end - s.start).toFixed(1)} s</td><td>${esc((s.words || []).join(", "))}</td>
+      <td class="muted">${esc((s.sources || []).map(x => x === "asr" ? "speech" : "subtitles").join(" + "))}${s.estimated ? " (estimated)" : ""}</td></tr>`).join("") +
+    `</tbody></table>` : `<p class="muted">Nothing needed muting.</p>`;
+  if (ctx.length) {
+    const muted = ctx.filter(c => c.mute).length;
+    html += `<h3>Judged in context (${muted} muted, ${ctx.length - muted} kept)</h3>
+      <p class="muted" style="margin-top:-4px">Words like "balls" or "come" that are only sometimes rude. If one is wrong, use its button: the correction applies to every film, and teaches the AI.</p>
+      <table><tbody>` + ctx.map(c => `<tr><td class="${c.mute ? "mute" : "keep"}">${c.mute ? "Muted" : "Kept"}</td><td>${marked(c.line)}</td>
+      <td class="muted">${esc(c.how === "cached" ? "AI (saved)" : c.how === "your correction" ? "your correction" : c.how === "fallback phrases" ? "phrase list" : c.how === "sound caption" ? "sound caption" : "AI")}</td>
+      <td style="text-align:right">${c.how === "sound caption" ? "" : `<button class="ghost small" data-line="${esc(c.line)}" data-mute="${c.mute ? 0 : 1}" data-path="${esc(path || "")}" onclick="correct(this)">${c.mute ? "Keep it" : "Mute it"}</button>`}</td></tr>`).join("") + `</tbody></table>`;
+  }
+  if ((d.names || []).length) html += `<h3>Names left alone</h3><p>${esc(d.names.join(", "))}</p>`;
+  html += `<p class="muted" style="margin-top:16px">Subtitles: ${esc(d.subtitles || "—")} · Speech: ${esc(d.asr || "—")}</p>`;
+  return html;
+}
+function seriesBody(it) {
+  if (!(it.seasons || []).length) return `<p class="muted">Jellyfin lists no episodes.</p>`;
+  return it.seasons.map(s => {
+    const clean = s.episodes.filter(e => ["clean", "nothing"].includes(e.status.state)).length;
+    return `<details class="season"${it.seasons.length === 1 ? " open" : ""}><summary>
+      <input type="checkbox" class="seasonall" onclick="event.stopPropagation()"> <b>${esc(s.name)}</b>
+      <span class="muted">${clean}/${s.episodes.length} clean</span></summary><div class="eps">` +
+      s.episodes.map(e => `<div class="ep" data-path="${esc(e.local || "")}" style="flex-wrap:wrap">
+        <input type="checkbox" class="epcb" value="${e.id}">
+        <span class="en">${e.episode ? esc(e.episode) + ". " : ""}${esc(e.name)}</span>${badge(e.status)}
+        <div class="epd" hidden></div></div>`).join("") + `</div></details>`;
+  }).join("");
+}
+async function toggleEpisode(el) {
+  const row = el.closest(".ep"), box = row.querySelector(".epd");
+  if (!box.hidden) { box.hidden = true; return; }
+  box.hidden = false; box.innerHTML = `<span class="muted">Loading…</span>`;
+  try { const d = await api(`/api/episode?path=${encodeURIComponent(row.dataset.path)}`); box.innerHTML = movieBody(d.details || {}, row.dataset.path, d.needs_rerender); }
+  catch (e) { box.textContent = e.message; }
+}
+function cleanEpisodes(all) {
+  const ids = all ? [] : [...dlg.querySelectorAll("input.epcb:checked")].map(x => x.value);
+  if (!all && !ids.length) return toast("Tick the episodes to clean first");
+  const anyClean = [...dlg.querySelectorAll(".ep")].some(r => r.querySelector(".badge.clean") && (all || r.querySelector("input:checked")));
+  clean({id: current.id, episodes: ids, redo: anyClean && confirm("Some of these are already clean. Redo them too?")});
+}
+async function clean(body) {
+  body.mode = $("#mode").value;
+  try { const job = await api("/api/clean", body); toast(`Queued: ${job.title}`); refreshJobs(); }
+  catch (e) { toast(e.message); }
+}
+
+// corrections
+function shortPhrase(line) {
+  // the marked word with up to 3 words either side: short phrases match more lines
+  const m = line.match(/^(.*?)\[\[(.+?)\]\](.*)$/);
+  if (!m) return line;
+  const before = m[1].trim().split(/\s+/).filter(Boolean).slice(-3), after = m[3].trim().split(/\s+/).filter(Boolean).slice(0, 3);
+  return [...before, `[[${m[2]}]]`, ...after].join(" ");
+}
+async function correct(btn) {
+  const mute = btn.dataset.mute === "1";
+  const phrase = prompt(`${mute ? "Mute" : "Keep"} this wherever these words appear together.\n` +
+    `Shorten it to cover more lines; keep the [[ ]] around the word:`, shortPhrase(btn.dataset.line));
+  if (!phrase) return;
+  try {
+    await api("/api/correct", {phrase, mute, path: btn.dataset.path});
+    const row = btn.closest("tr");
+    row.cells[0].className = mute ? "mute" : "keep";
+    row.cells[0].textContent = mute ? "Muted" : "Kept";
+    row.cells[2].textContent = "your correction";
+    btn.remove();
+    const banner = btn.dataset.path && dlg.querySelector(`.rerender[data-path="${CSS.escape(btn.dataset.path)}"]`);
+    if (banner) banner.hidden = false;
+    toast(`Saved: ${mute ? "mute" : "keep"} "${phrase.replace(/\[\[|\]\]/g, "")}"`);
+  } catch (e) { toast(e.message); }
+}
+async function rerender(btn) {
+  const box = btn.closest(".rerender");
+  try {
+    const job = await api("/api/rerender", {path: box.dataset.path});
+    box.innerHTML = `<span>Queued: ${esc(job.title)}. See Jobs.</span>`;
+    refreshJobs();
+  } catch (e) { toast(e.message); }
+}
+
+// jobs
+async function loadJobs() {
+  const jobs = await api("/api/jobs").catch(() => []);
+  const active = jobs.filter(j => ["queued", "running"].includes(j.state)).length;
+  $("#jobcount").hidden = !active; $("#jobcount").textContent = active;
+  if (tab !== "jobs") return;
+  $("#joblist").innerHTML = jobs.length ? jobs.map(j => `
+    <div class="job"><div class="jt"><div><b>${esc(j.title)}</b> <span class="badge ${j.state === "done" ? "clean" : j.state}">${esc(j.state)}</span>
+      <span class="muted" style="font-size:13px">${j.mode === "beside" ? "beside the file" : "inside the file"}${j.redo ? ", redo" : ""}</span></div>
+      <div class="jp">${esc(j.progress || (j.finished ? "finished " + new Date(j.finished * 1000).toLocaleString() : "waiting"))}</div></div>
+      ${["queued", "running"].includes(j.state) ? `<button class="ghost" data-cancel="${j.id}">Cancel</button>` : ""}</div>`).join("")
+    : `<div class="empty">No jobs yet. Search for a title and choose "Make clean version".</div>`;
+  document.querySelectorAll("[data-cancel]").forEach(b => b.onclick = async () => {
+    if (confirm("Cancel this job?")) { await api("/api/cancel", {id: b.dataset.cancel}); loadJobs(); } });
+}
+const refreshJobs = () => loadJobs();
+$("#clearjobs").onclick = async () => { await api("/api/clear", {}); loadJobs(); };
+setInterval(refreshJobs, 3000);
+
+// cleaned library
+let libItems = [];
+async function loadLibrary() {
+  libItems = await api("/api/processed").catch(e => (toast(e.message), []));
+  renderLibrary();
+}
+function renderLibrary() {
+  const f = $("#libfilter").value.trim().toLowerCase(), kind = $("#f-kind").value, state = $("#f-state").value,
+        lib = $("#f-lib").value, where = $("#f-where").value, min = +$("#f-mutes").value, sort = $("#f-sort").value;
+  // the library list follows what is there
+  const libs = [...new Set(libItems.map(i => i.library).filter(Boolean))].sort();
+  const sel = $("#f-lib");
+  if (sel.options.length !== libs.length + 1) {
+    sel.innerHTML = `<option value="">All libraries</option>` + libs.map(l => `<option>${esc(l)}</option>`).join("");
+    sel.value = libs.includes(lib) ? lib : "";
+  }
+  const st = i => i.status.state;
+  const rows = libItems.filter(i =>
+      (!f || (i.title + " " + i.file + " " + i.words.join(" ")).toLowerCase().includes(f)) &&
+      (!kind || (kind === "episode") === i.episode) &&
+      (!state || (state === "cleaned" ? ["clean", "nothing"].includes(st(i)) : state === "rerender" ? i.needs_rerender : st(i) === state)) &&
+      (!sel.value || i.library === sel.value) &&
+      (!where || i.status.where === where) &&
+      i.mutes >= min)
+    .sort(sort === "mutes" ? (a, b) => b.mutes - a.mutes
+        : sort === "estimated" ? (a, b) => b.estimated - a.estimated
+        : sort === "recent" ? (a, b) => String(b.status.scanned || "").localeCompare(String(a.status.scanned || ""))
+        : (a, b) => a.title.localeCompare(b.title) || a.file.localeCompare(b.file));
+  $("#libcount").textContent = `Showing ${rows.length} of ${libItems.length} scanned` +
+    (rows.length ? ` · ${rows.reduce((n, i) => n + i.mutes, 0).toLocaleString()} mutes` : "");
+  const day = d => d ? new Date(d).toLocaleDateString() : "";
+  $("#libtable").innerHTML = rows.length ? rows.map((i, k) => `<tr class="librow" data-k="${k}" style="cursor:pointer">
+    <td>${esc(i.title)}${i.episode ? `<div class="muted" style="font-size:12px">${esc(i.file)}</div>` : ""}</td>
+    <td class="muted">${esc(i.library)}</td>
+    <td>${badge({state: st(i)})}${i.needs_rerender ? ` <span class="badge partial">needs re-render</span>` : ""}${i.status.where ? `<div class="muted" style="font-size:12px">${i.status.where === "beside" ? "beside the file" : "inside the file"}</div>` : ""}</td>
+    <td class="num">${i.mutes}${i.estimated ? `<div class="muted" style="font-size:12px">${i.estimated} est.</div>` : ""}</td>
+    <td class="muted">${day(i.status.scanned)}</td></tr>`).join("")
+    : `<tr><td colspan="5" class="muted">Nothing matches these filters.</td></tr>`;
+  libRows = rows;
+  document.querySelectorAll(".librow").forEach(r => r.onclick = () => openProcessed(libRows[+r.dataset.k]));
+}
+let libRows = [];
+async function openProcessed(i) {
+  dlg.innerHTML = `<div class="dhead"><div>Loading…</div></div>`;
+  dlg.showModal();
+  try {
+    const d = await api(`/api/episode?path=${encodeURIComponent(i.path)}`);
+    dlg.innerHTML = `<div class="dhead"><div style="flex:1;min-width:0"><h2>${esc(i.title)}</h2>
+      <div class="muted" style="font-size:13px;word-break:break-all">${esc(i.file)}</div>${badge(d.status)}
+      <div class="muted" style="margin-top:6px">${esc(i.library)}</div></div>
+      <button class="ghost close" onclick="detail.close()">Close</button></div>
+      <div class="dbody">${movieBody(d.details || {}, i.path, d.needs_rerender)}</div>`;
+  } catch (e) { dlg.innerHTML = `<div class="dhead"><div>${esc(e.message)}</div><button class="ghost close" onclick="detail.close()">Close</button></div>`; }
+}
+for (const id of ["#libfilter", "#f-kind", "#f-state", "#f-lib", "#f-where", "#f-mutes", "#f-sort"])
+  $(id)[id === "#libfilter" ? "oninput" : "onchange"] = renderLibrary;
+$("#f-reset").onclick = () => {
+  $("#libfilter").value = ""; $("#f-kind").value = ""; $("#f-state").value = "cleaned"; $("#f-lib").value = "";
+  $("#f-where").value = ""; $("#f-mutes").value = "0"; $("#f-sort").value = "title"; renderLibrary();
+};
+$("#reindex").onclick = async () => { await api("/api/reindex", {}); toast("Rescanning the library folders; this takes a minute"); };
+
+// stats
+async function loadStats() {
+  let s;
+  try { s = await api("/api/stats"); } catch (e) { return toast(e.message); }
+  const top = s.words.slice(0, 30), max = top.length ? top[0][1] : 1;
+  const exact = s.mutes - s.estimated;
+  $("#statsbody").innerHTML = `
+    <div class="tiles">
+      <div class="tile"><div class="v">${s.titles_clean}</div><div class="l">clean titles and episodes</div></div>
+      <div class="tile"><div class="v">${s.titles_processed - s.titles_clean}</div><div class="l">scanned, not cleaned yet</div></div>
+      <div class="tile"><div class="v">${s.mutes.toLocaleString()}</div><div class="l">mutes in all</div></div>
+      <div class="tile"><div class="v">${s.mutes ? Math.round(100 * exact / s.mutes) : 0}%</div><div class="l">timed to the exact word</div></div>
+    </div>
+    <div class="cols">
+      <div class="panel"><h3 style="margin-top:0">Most muted words (clean titles)</h3>${top.map(([w, n]) => `
+        <div class="barrow"><span class="w">${esc(w)}</span><span class="b" style="width:${(100 * n / max).toFixed(1)}%"></span><span class="num">${n}</span></div>`).join("") || `<p class="muted">Nothing yet.</p>`}
+        ${s.words.length > 30 ? `<details style="margin-top:8px"><summary class="muted">All ${s.words.length} words</summary><p>${s.words.map(([w, n]) => `${esc(w)} (${n})`).join(", ")}</p></details>` : ""}</div>
+      <div class="panel"><h3 style="margin-top:0">Most mutes (clean titles)</h3><table><tbody>${s.top_titles.map(t => `<tr><td>${esc(t.title)}</td><td class="num">${t.mutes}</td></tr>`).join("")}</tbody></table></div>
+    </div>`;
+}
+
+search();
+loadJobs();
+</script>
+</body>
+</html>

@@ -162,11 +162,12 @@ class Matcher:
         allow = [compile_pattern(p, "allow") for p in load_default_allow() + list(wcfg.get("allow", []))]
         # Longest phrases first so "son of a bitch" wins over "bitch" at the same position.
         ccfg = cfg.get("context", {})
-        rules = [ContextRule([compile_pattern(w, r.get("tier", "moderate")) for w in r.get("words", [])],
-                             str(r.get("meaning", "")),
-                             [compile_pattern(f, "allow") for f in r.get("fallback", [])],
-                             str(r.get("when_unsure", "keep")).lower() == "mute",
-                             str(r.get("innocent", "")), bool(r.get("ask_twice", False)))
+        rules = [ContextRule(patterns=[compile_pattern(w, r.get("tier", "moderate")) for w in r.get("words", [])],
+                             meaning=str(r.get("meaning", "")),
+                             fallback=[compile_pattern(f, "allow") for f in r.get("fallback", [])],
+                             unsure_mute=str(r.get("when_unsure", "keep")).lower() == "mute",
+                             innocent=str(r.get("innocent", "")),
+                             ask_twice=bool(r.get("ask_twice", False)))
                  for r in ccfg.get("rules", []) if r.get("words") and r.get("meaning")]
         # A word a rule names is judged in context instead of always censored ("bitch*"
         # in a rule replaces "bitch*" in the list; "son of a bitch" stays as it is).

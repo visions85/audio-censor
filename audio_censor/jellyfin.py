@@ -71,12 +71,16 @@ class Jellyfin:
         q = urllib.parse.urlencode(query)
         return _request(f"{self.url}{path}" + (f"?{q}" if q else ""), self.key)
 
+    def _get_slow(self, path: str, **query) -> dict:
+        q = urllib.parse.urlencode(query)
+        return _request(f"{self.url}{path}" + (f"?{q}" if q else ""), self.key, timeout=180.0)
+
     # ------------------------------------------------------------------ lookup
 
     def _index(self) -> dict[tuple[str, ...], list[str]]:
         """Folder + file name (and file name alone) -> item ids, for every movie and episode."""
         if self._by_tail is None:
-            data = self._get("/Items", Recursive="true", IncludeItemTypes="Movie,Episode", Fields="Path")
+            data = self._get_slow("/Items", Recursive="true", IncludeItemTypes="Movie,Episode", Fields="Path")
             self._by_tail = {}
             for item in data.get("Items", []):
                 parts = _parts(item.get("Path") or "")
@@ -87,26 +91,49 @@ class Jellyfin:
 
     def item_id(self, media: Path) -> str | None:
         s = str(media)
-        for local, remote in self.path_map.items():
+        for local, remote in sorted(self.path_map.items(), key=lambda kv: -len(kv[0])):
             if s.startswith(local + "/"):
                 s = remote + s[len(local):]
+                break
         parts = _parts(s)
+        # A title search is quick; the full listing (every movie and episode, 60,000+ on a
+        # big server) is the fallback for titles the search misses.
+        found = self._search(s, parts)
+        if found:
+            return found
         index = self._index()
         for n in (2, 1):
             ids = set(index.get(parts[-n:], [])) if len(parts) >= n else set()
             if len(ids) == 1:
                 return ids.pop()
-        # Jellyfin's full listing can leave items out (seen with Home Alone) that its
-        # search still finds: search by the folder's title and match the path.
-        title = re.sub(r"\s*[\[({].*$", "", Path(s).parent.name).strip() or Path(s).stem
-        data = self._get("/Items", Recursive="true", IncludeItemTypes="Movie,Episode", Fields="Path,MediaSources",
-                         SearchTerm=title)
-        # A film merged with its edition is one item whose Path is only one of its
-        # versions; the others are among its MediaSources.
-        ids = {i["Id"] for i in data.get("Items", [])
-               if any(_parts(p or "")[-2:] == parts[-2:]
-                      for p in [i.get("Path")] + [m.get("Path") for m in i.get("MediaSources") or []])}
-        return ids.pop() if len(ids) == 1 else None
+        return None
+
+    def _search(self, s: str, parts: tuple[str, ...]) -> str | None:
+        p = Path(s)
+        folder = p.parent.name
+        # an episode's show is the folder above its "Season NN" folder
+        if re.match(r"(?i)^(season|series|specials)\b", folder) and len(p.parents) > 1:
+            folder = p.parent.parent.name
+        title = re.sub(r"\s*[\[({].*$", "", folder).strip() or p.stem
+        for kind in ("Movie", "Episode"):
+            query = {"Recursive": "true", "IncludeItemTypes": kind, "Fields": "Path,MediaSources",
+                     "SearchTerm": title} if kind == "Movie" else None
+            if query is None:
+                series = self._get("/Items", Recursive="true", IncludeItemTypes="Series", SearchTerm=title,
+                                   Fields="Path").get("Items", [])
+                items = []
+                for sr in series[:5]:
+                    items += self._get(f"/Shows/{sr['Id']}/Episodes", Fields="Path,MediaSources").get("Items", [])
+            else:
+                items = self._get("/Items", **query).get("Items", [])
+            # A film merged with its edition is one item whose Path is only one of its
+            # versions; the others are among its MediaSources.
+            paths = {i["Id"]: [i.get("Path")] + [m.get("Path") for m in i.get("MediaSources") or []] for i in items}
+            exact = {k for k, ps in paths.items() if s in ps}          # same full path (path_map set)
+            ids = exact or {k for k, ps in paths.items() if any(_parts(x or "")[-2:] == parts[-2:] for x in ps)}
+            if len(ids) == 1:
+                return ids.pop()
+        return None
 
     def _audio_streams(self, item_id: str, target: Path) -> list[dict]:
         data = self._get("/Items", Ids=item_id, Fields="MediaSources,MediaStreams,Path")

@@ -51,6 +51,11 @@ DEFAULTS: dict = {
         "channel": "center",           # center: hear only a surround track's dialogue channel | mix
         "recheck": True,               # re-listen to subtitle lines whose swear the transcript missed
     },
+    "web": {
+        "mode": "beside",              # default for new clean versions: beside (Jellyfin) | in file
+        "workers": 2,                  # jobs at once (their scans still take turns on the GPU)
+        "password": "",                # set one to require a login (user name ignored)
+    },
     "context": {
         # words rude in only one sense, judged in context by a local AI (see context.py);
         # rules = [{words = ["balls", "nuts"], meaning = "testicles", fallback = [...]}]

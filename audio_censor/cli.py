@@ -1062,6 +1062,18 @@ def cmd_corrections(args, cfg) -> int:
     return 0
 
 
+def cmd_serve(args, cfg) -> int:
+    """The web page: search Jellyfin, make clean versions, see what was muted."""
+    from .web import serve
+    try:
+        serve(cfg, args.host, args.port)
+    except JellyfinError as exc:
+        raise UserError(str(exc))
+    except KeyboardInterrupt:
+        return 0
+    return 0
+
+
 def cmd_words(args, cfg) -> int:
     matcher = Matcher.from_config(cfg)
     tiers = active_tiers(cfg["level"])
@@ -1357,6 +1369,11 @@ def build_parser() -> argparse.ArgumentParser:
     sp = sub.add_parser("corrections", help="list the corrections given to the AI")
     sp.add_argument("--remove", type=int, nargs="+", metavar="N")
     sp.set_defaults(func=cmd_corrections)
+
+    sp = sub.add_parser("serve", help="web page: search Jellyfin, make clean versions, see stats")
+    sp.add_argument("--host", default="0.0.0.0", help="address to listen on (default: every interface)")
+    sp.add_argument("--port", type=int, default=8787)
+    sp.set_defaults(func=cmd_serve)
 
     sp = sub.add_parser("words", help="show the active word list")
     sp.add_argument("--level", choices=TIERS)

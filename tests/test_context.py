@@ -75,3 +75,40 @@ def test_a_correction_overrides_the_ai_and_teaches_it(monkeypatch, capsys):
     assert "throw me some [[balls]]\nAnswer: no" in m.judge.prompt(m.rules[0])   # and is shown as an example
     assert main(["corrections", "--remove", "1"]) == 0
     assert "throw me" not in capsys.readouterr().out
+
+
+def test_sound_captions_are_not_judged(monkeypatch):
+    m, asked = _matcher(monkeypatch, answers=["[[balls]]"])
+    lines = ["[BALLS BOUNCING]", "Watch your balls!"]
+    m.prepare(lines)
+    assert m.find(tokenize(lines[0])) == [] and asked == []
+    assert m.find(tokenize(lines[1]))
+
+
+def test_a_mute_correction_beats_a_keep(monkeypatch):
+    from audio_censor import context
+    context.save_corrections([{"phrase": "[[come]] in her", "mute": True}, {"phrase": "wants to [[come]] in", "mute": False}])
+    m, asked = _matcher(monkeypatch, answers=[])
+    m.rules[0].patterns.append(__import__("audio_censor.wordlist", fromlist=["x"]).compile_pattern("come", "moderate"))
+    for line, muted in (("he wants to come in", False), ("he wants to come in her", True), ("come in her", True)):
+        m.prepare([line])
+        assert bool(m.find(tokenize(line))) is muted, line
+    assert asked == []
+
+
+def test_a_line_anchored_correction(monkeypatch):
+    from audio_censor import context
+    context.save_corrections([{"phrase": "^[[nuts]]$", "mute": False}])
+    m, asked = _matcher(monkeypatch, answers=["[[nuts]]"])          # the "AI" mutes every nuts
+    for line, muted in (("Nuts.", False), ("Nuts!", False), ("Kicked in the nuts.", True), ("Nuts to you", True)):
+        m.prepare([line])
+        assert bool(m.find(tokenize(line))) is muted, line
+
+
+def test_rule_settings_reach_the_right_fields():
+    cfg = deep_merge(load_config(), {"context": {"rules": [
+        {"words": ["nuts"], "meaning": "testicles", "innocent": "food", "when_unsure": "keep", "ask_twice": True},
+        {"words": ["prick"], "meaning": "insult", "innocent": "a needle", "when_unsure": "mute"}]}})
+    a, b = Matcher.from_config(cfg).rules
+    assert (a.meaning, a.innocent, a.unsure_mute, a.ask_twice) == ("testicles", "food", False, True)
+    assert (b.innocent, b.unsure_mute, b.ask_twice) == ("a needle", True, False)
