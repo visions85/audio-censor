@@ -120,7 +120,6 @@ class ContextJudge:
         self._down: str | None = None          # why the model cannot be used this run
         self._used = False
         self._told: set[str] = set()
-        self.decisions: list[tuple[str, str, bool, str]] = []   # (word, context line, yes, how)
         self.history: list[dict] = []                            # this film's decisions, for its .censor.json
         self.corrections = []
         for c in load_corrections():
@@ -201,8 +200,9 @@ class ContextJudge:
         tag = f"{shown}:{yes}"
         if tag not in self._told:
             self._told.add(tag)
-            self.decisions.append((" ".join(words[i:j]), shown, yes, how))
             self.history.append({"word": " ".join(words[i:j]), "line": shown, "mute": yes, "how": how})
+            # printed as it is decided, so a run can be watched live
+            eprint(f"  context: {'MUTE' if yes else 'keep'} {' '.join(words[i:j])!r} in \"{shown[:90]}\" ({how})")
         return yes
 
     def _corrected(self, words: list[str], i: int, j: int) -> bool | None:
@@ -300,9 +300,7 @@ class ContextJudge:
         self._used = False
 
     def report(self) -> None:
-        for word, shown, yes, how in self.decisions:
-            eprint(f"  context: {'MUTE' if yes else 'keep'} {word!r} in \"{shown[:90]}\" ({how})")
-        self.decisions = []
+        """Decisions are printed as they are made (see _note)."""
 
     # ------------------------------------------------------------------ cache
 

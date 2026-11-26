@@ -74,6 +74,7 @@ DEFAULTS: dict = {
         "channel": "center",           # center | all
     },
     "output": {
+        "aac_coder": "fast",           # AAC search: fast (about 2x quicker) | twoloop (ffmpeg's default)
         "suffix": ".clean",
         "container": "mkv",
         "codec": "auto",               # auto | aac | ac3 | eac3 | flac | opus ...

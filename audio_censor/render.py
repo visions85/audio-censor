@@ -26,6 +26,16 @@ def filter_script_option() -> str:
     return "-filter_complex_script" if "-filter_complex_script" in (proc.stdout or "") else "-/filter_complex"
 
 
+def _encoder_opts(codec: str, cfg: dict, spec: str) -> list[str]:
+    """ffmpeg's AAC encoder is single-threaded and slow for 7.1 (about 9x realtime with
+    its default "twoloop" search); "fast" is about twice as quick at the same bitrate."""
+    if codec == "aac":
+        coder = str(cfg.get("output", {}).get("aac_coder", "fast"))
+        if coder and coder != "default":
+            return [f"-aac_coder{spec}", coder]
+    return []
+
+
 def choose_codec(stream: Stream, cfg: dict) -> tuple[str, str | None]:
     out = cfg.get("output", {})
     codec = (out.get("codec") or "auto").lower()
@@ -130,6 +140,7 @@ def build_command(media: Path, info: MediaInfo, dialogue: Stream, spans: list[Sp
         cmd += [f"-b:a:{new_idx}", bitrate]
     if codec == "aac" and (dialogue.channels or 2) > 2:
         cmd += [f"-ac:a:{new_idx}", str(dialogue.channels)]
+    cmd += _encoder_opts(codec, cfg, f":a:{new_idx}")
     cmd += [f"-metadata:s:a:{new_idx}", f"title={clean_title(spec, cfg)}"]
     if dialogue.language:
         cmd += [f"-metadata:s:a:{new_idx}", f"language={dialogue.language}"]
@@ -294,6 +305,7 @@ def render_audio_sidecar(media: Path, info: MediaInfo, dialogue: Stream, spans: 
             cmd += ["-b:a", bitrate]
         if codec == "aac" and (dialogue.channels or 2) > 2:
             cmd += ["-ac", str(dialogue.channels)]
+        cmd += _encoder_opts(codec, cfg, "")
         cmd += ["-metadata:s:a:0", f"title={clean_title(spec, cfg)}",
                 "-metadata:s:a:0", f"language={dialogue.language or 'eng'}", "-disposition:a:0", "default",
                 "-f", "matroska", str(tmp_out)]

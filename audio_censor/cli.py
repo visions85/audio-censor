@@ -15,7 +15,7 @@ import time
 from importlib import resources
 from pathlib import Path
 
-from . import __version__, asr, edition, scenes, staging, thrash
+from . import __version__, asr, edition, gpu, scenes, staging, thrash
 from .beep import BeepError, BeepSpec, WAVES
 from .config import default_config_path, load_config, write_template
 from .media import (VIDEO_EXTS, MediaError, eprint, has_center, is_own_clean_audio, language_matches,
@@ -692,7 +692,8 @@ def cmd_scan(args, cfg) -> int:
                 counts["already scanned"] += 1
                 continue
             with _stage(media, cfg, args, copies=1, render=False) as st:
-                spans, meta = scan_file(st.local, cfg, args, pos, origin=media)
+                with gpu.turn():
+                    spans, meta = scan_file(st.local, cfg, args, pos, origin=media)
                 save_sidecar(sidecar_path(st.local), st.local, spans, meta)
             if meta.get("skipped"):
                 print(f"{media.name}: {meta['skipped']}, skipped -> {side.name}")
@@ -824,7 +825,8 @@ def cmd_process(args, cfg) -> int:
             copies = 2 + bool(in_place(cfg) and cfg["output"].get("backup"))
             audio_out = None
             with _stage(media, cfg, args, copies) as st:
-                spans, meta = scan_file(st.local, cfg, args, pos, origin=media)
+                with gpu.turn():
+                    spans, meta = scan_file(st.local, cfg, args, pos, origin=media)
                 save_sidecar(sidecar_path(st.local), st.local, spans, meta)
                 if meta.get("skipped"):
                     counts["skipped (rating)"] += 1
@@ -1112,7 +1114,8 @@ def cmd_play(args, cfg) -> int:
     side = sidecar_path(media)
     if not side.exists():
         eprint(f"{media.name}: no span file yet, scanning first")
-        spans, meta = scan_file(media, cfg, args)
+        with gpu.turn():
+            spans, meta = scan_file(media, cfg, args)
         save_sidecar(side, media, spans, meta)
     spans, meta = load_sidecar(side)
     if meta.get("skipped"):
