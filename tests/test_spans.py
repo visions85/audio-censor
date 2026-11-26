@@ -78,7 +78,7 @@ def test_asr_scan_words_phrase_and_probability():
              Word(1.6, 2.0, " bitch!", 0.7), Word(3.0, 3.4, " F***ing", 0.9)]
     hits = scan_words(words, M)
     assert [(h.word, h.start, h.end) for h in hits] == [
-        ("son of a bitch", 1.2, 2.0), ("bitch", 1.6, 2.0), ("f***ing", 3.0, 3.4)]
+        ("son of a bitch", 1.6, 2.0), ("bitch", 1.6, 2.0), ("f***ing", 3.0, 3.4)]   # only "bitch" is muted
     assert hits[0].confidence == 0.7 and hits[2].tier == "strong"
 
 

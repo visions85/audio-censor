@@ -179,8 +179,10 @@ def scan_file(media: Path, cfg: dict, args: argparse.Namespace, position: str = 
             cues = load_cues(src.path) if src else []
             sub_source = src.description if src else "no subtitles found"
             if cues:
+                matcher.prepare([c.text for c in cues])     # before learn(): it matches too
                 detector.learn([c.text for c in cues], matcher)
                 sub_hits = scan_cues(cues, matcher, scan_cfg.get("subtitle_mode", "estimate"), detector)
+                _context_report(matcher)
                 names = sum(h.name_use for h in sub_hits)
                 eprint(f"  subtitles: {sub_source}, {len(cues)} cues, {len(sub_hits) - names} hits"
                        + (f", {names} name use(s) exempted" if names else ""))
@@ -213,6 +215,7 @@ def scan_file(media: Path, cfg: dict, args: argparse.Namespace, position: str = 
                     if scan_cfg.get("cache_transcript", True):
                         asr.save_transcript(tpath, words, cfg["asr"]["model"], dialogue.type_index, channel)
                 asr_hits = asr.scan_words(words, matcher, detector)
+                _context_report(matcher)
                 if sub_hits and cfg["asr"].get("recheck", True):
                     extra, checked = asr.recheck_subtitle_hits(
                         media, dialogue.type_index, sub_hits, asr_hits, matcher, cfg, work,
@@ -229,8 +232,12 @@ def scan_file(media: Path, cfg: dict, args: argparse.Namespace, position: str = 
                        + (f", {names} name use(s) exempted" if names else "")
                        + (f", {vetoed} contradicted by subtitles (sound-alikes)" if vetoed else ""))
 
+    if matcher.judge is not None:
+        matcher.judge.release()
     spans = build_spans(sub_hits, asr_hits, cfg, info.duration)
     meta = {**base_meta, "subtitles": sub_source, "asr": asr_source, "names": sorted(detector.names)}
+    if matcher.judge is not None and matcher.judge.history:
+        meta["context"] = matcher.judge.history     # what the AI (or your corrections) decided
     return spans, meta
 
 
@@ -346,6 +353,11 @@ def decide_audio_language(media: Path, info, dialogue, cfg: dict, args, work: Pa
             lang = (scan.get("assume_untagged") or "").lower()
             how = "untagged, assumed" if lang else "untagged"
     return language_matches(lang, cfg["languages"]), lang, how
+
+
+def _context_report(matcher: Matcher) -> None:
+    if matcher.judge is not None:
+        matcher.judge.report()
 
 
 def _asr_channel(cfg: dict, stream) -> str:
@@ -970,6 +982,12 @@ def cmd_review(args, cfg) -> int:
         print(f"{media.name}: {len(spans)} span(s)  level={meta.get('level')}  "
               f"subtitles={meta.get('subtitles')}  asr={meta.get('asr')}")
         print(format_table(spans))
+        decided = meta.get("context", [])
+        if decided:
+            print(f"  words judged in context ({sum(d['mute'] for d in decided)} muted, "
+                  f"{sum(not d['mute'] for d in decided)} kept); fix one with: audio-censor correct \"...\" --keep/--mute")
+            for d in decided:
+                print(f"    {'MUTE' if d['mute'] else 'keep'}  {d['line'][:100]}  ({d['how']})")
     return 0
 
 
@@ -979,6 +997,66 @@ def cmd_info(args, cfg) -> int:
         print(f"{media.name}  ({info.duration / 60:.1f} min)")
         for s in info.streams:
             print(f"  {s.describe()}")
+    return 0
+
+
+def cmd_correct(args, cfg) -> int:
+    """Record the right answer for one use of a context word; the AI also learns from it."""
+    from . import context
+    phrase = args.phrase.strip()
+    if "[[" not in phrase:
+        matcher = Matcher.from_config(cfg)
+        from .wordlist import tokenize
+        toks = tokenize(phrase)
+        words = [t.text for t in toks]
+        found = [(k, k + len(p)) for k in range(len(words)) for r in matcher.rules for p in r.patterns
+                 if matcher._try(p, words, k)]
+        if len(found) != 1:
+            raise UserError("say which word you mean with [[ ]], e.g. \"a private [[dick]]\""
+                            if found else "no word in that phrase is judged in context (see [[context.rules]])")
+        a, b = found[0]
+        phrase = phrase[:toks[a].start] + "[[" + phrase[toks[a].start:toks[b - 1].end] + "]]" + phrase[toks[b - 1].end:]
+    try:
+        cw, cs, ce = context.parse_phrase(phrase)
+    except ValueError as exc:
+        raise UserError(str(exc))
+    items = [c for c in context.load_corrections() if context.parse_phrase(c["phrase"]) != (cw, cs, ce)]
+    items.append({"phrase": phrase, "mute": bool(args.mute), "note": args.note or ""})
+    context.save_corrections(items)
+    print(f"{'mute' if args.mute else 'keep'}: {phrase}" + (f"  ({args.note})" if args.note else ""))
+    if args.find:
+        print("films whose last scan decided this differently (re-run 'process --overwrite' on them):")
+        n = 0
+        for side in sorted(Path(args.find).expanduser().glob("**/*.censor.json")):
+            try:
+                _, meta = load_sidecar(side)
+            except Exception:
+                continue
+            for d in meta.get("context", []):
+                line = d.get("line", "").replace("[[", "").replace("]]", "").split()
+                hit = any(line[k:k + len(cw)] == cw for k in range(len(line) - len(cw) + 1))
+                if hit and bool(d.get("mute")) != bool(args.mute):
+                    print(f"  {side.parent.name}: {d.get('line')}")
+                    n += 1
+                    break
+        if not n:
+            print("  none")
+    return 0
+
+
+def cmd_corrections(args, cfg) -> int:
+    from . import context
+    items = context.load_corrections()
+    if args.remove:
+        for i in sorted(set(args.remove), reverse=True):
+            if not 1 <= i <= len(items):
+                raise UserError(f"no correction {i} (have 1..{len(items)})")
+            items.pop(i - 1)
+        context.save_corrections(items)
+    if not items:
+        print("no corrections yet ('audio-censor correct \"a private [[dick]]\" --keep')")
+    for i, c in enumerate(items, 1):
+        print(f"{i:3}. {'mute' if c.get('mute') else 'keep'}  {c['phrase']}" + (f"  ({c['note']})" if c.get("note") else ""))
     return 0
 
 
@@ -1263,6 +1341,19 @@ def build_parser() -> argparse.ArgumentParser:
     sp = sub.add_parser("info", help="list a file's streams (to pick --audio-track)")
     add_input_arg(sp)
     sp.set_defaults(func=cmd_info)
+
+    sp = sub.add_parser("correct", help="give the right answer for a word the AI judged wrong (it learns from it)")
+    sp.add_argument("phrase", help='the words around it, the word in [[ ]]: "a private [[dick]], ma\'am"')
+    g = sp.add_mutually_exclusive_group(required=True)
+    g.add_argument("--keep", action="store_true", help="innocent here: do not mute")
+    g.add_argument("--mute", action="store_true", help="rude here: mute it")
+    sp.add_argument("--note", help="e.g. the film it came from")
+    sp.add_argument("--find", metavar="DIR", help="list films under DIR whose last scan decided otherwise")
+    sp.set_defaults(func=cmd_correct)
+
+    sp = sub.add_parser("corrections", help="list the corrections given to the AI")
+    sp.add_argument("--remove", type=int, nargs="+", metavar="N")
+    sp.set_defaults(func=cmd_corrections)
 
     sp = sub.add_parser("words", help="show the active word list")
     sp.add_argument("--level", choices=TIERS)

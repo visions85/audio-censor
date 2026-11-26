@@ -277,9 +277,13 @@ def write_clean_subtitles(source: SubtitleSource, matcher: Matcher, out_path: Pa
                           style: str, replacement: str, detector: "NameDetector | None" = None) -> int:
     """Write a censored copy of `source` to out_path (format follows the extension)."""
     subs = load_subs(source.path)
+    texts = [c.text for c in cues_from_subs(subs)]
+    matcher.prepare(texts)
     if detector is not None:
-        detector.learn([c.text for c in cues_from_subs(subs)], matcher)
+        detector.learn(texts, matcher)
     clean, count = censor_subs(subs, matcher, style, replacement, detector)
+    if matcher.judge is not None:
+        matcher.judge.release()
     out_path.parent.mkdir(parents=True, exist_ok=True)
     clean.save(str(out_path), encoding="utf-8")
     return count

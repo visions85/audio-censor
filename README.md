@@ -343,6 +343,44 @@ Dickinson and farthing are left alone. If Whisper hears "damn" where the subtitl
 "Hoover Dam", the subtitle wins: `scan.homophones` lists the innocent sound-alikes that
 veto an ASR-only hit when they appear in the subtitle line at that moment.
 
+### Words rude in only one sense: `[[context.rules]]`
+
+"Balls", "nuts", "come" or "bitch" are usually innocent. Words named in a context rule
+are judged each time by a local AI model served by [Ollama](https://ollama.com)
+(`gemma4:12b` by default, under `[context]`). It is shown the subtitle line with its
+neighbours, or the transcript around the word, and asked whether the word is used in the
+rule's `meaning` or its `innocent` sense:
+
+```toml
+[[context.rules]]
+words = ["balls", "nuts"]
+meaning = "testicles, or crude slang and jokes about them"
+innocent = "a literal ball or nut, or meaning crazy"
+when_unsure = "keep"        # no AI available: mute only on a fallback phrase
+fallback = ["bust* * balls", "in the nuts"]
+ask_twice = true            # also ask about the line alone; either "yes" mutes
+```
+
+A rule that names a word on the built-in list (`bitch*`, `prick`) takes it over. With
+`when_unsure = "mute"` the AI is only asked whether the use is clearly innocent, and
+anything unclear stays muted. Answers are cached, so a re-run asks nothing new. Each
+film's decisions are recorded in its `.censor.json`; `audio-censor review FILM` lists
+them. While a game is running, or Ollama is down, the fallback phrases decide.
+
+When the AI gets one wrong, correct it:
+
+```bash
+audio-censor correct "a private [[dick]]" --keep --find /media/films
+audio-censor correct "kicked him in the nuts" --mute
+audio-censor corrections                 # list, or --remove N
+```
+
+A correction decides every use the phrase surrounds, and is shown to the AI as a worked
+example for similar lines. Short phrases match more. `--find` lists the films whose last
+scan decided otherwise, which then need `process --overwrite`.
+
+Only the rude word of a listed phrase is muted: "son of a [bitch]", "god [damn]".
+
 ### Names versus swears
 
 A film can have a character called Dick, or a Fagin who trips the `fag*` prefix. The

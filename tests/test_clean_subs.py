@@ -16,9 +16,10 @@ def test_first_letter_keeps_case():
     assert censor_text("SHIT happens", M, "first-letter") == ("S*** happens", 1)
 
 
-def test_bleep_replaces_whole_phrase_once():
+def test_only_the_rude_word_of_a_phrase_is_bleeped():
     text, n = censor_text("You son of a bitch!", M, "bleep", "[BLEEP]")
-    assert text == "You [BLEEP]!" and n == 1
+    assert text == "You son of a [BLEEP]!" and n == 1
+    assert censor_text("God damn it.", M)[0] == "God **** it."
 
 
 def test_remove_collapses_spaces():

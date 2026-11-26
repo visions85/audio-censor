@@ -71,7 +71,9 @@ def compile_pattern(raw: str, tier: str) -> Pattern:
         return Pattern(raw, tier, (("regex", re.compile(raw[3:])),))
     parts = []
     for word in normalize_text(raw).split():
-        if word.endswith("*") and len(word) > 1:
+        if word == "*":
+            parts.append(("any", None))       # any one word: "bust* * balls"
+        elif word.endswith("*") and len(word) > 1:
             parts.append(("prefix", word[:-1].strip("'")))
         else:
             parts.append(("exact", word.strip("'")))
@@ -80,6 +82,8 @@ def compile_pattern(raw: str, tier: str) -> Pattern:
 
 def _part_matches(part, token: str) -> bool:
     kind, value = part
+    if kind == "any":
+        return True
     if kind == "exact":
         return token == value or (token.endswith("'s") and token[:-2] == value)
     if kind == "prefix":
@@ -109,12 +113,38 @@ def is_asterisked(token: str) -> bool:
     return "*" in token and len(token) >= 3 and re.search(r"[a-z]", token) is not None
 
 
+@dataclass
+class ContextRule:
+    """Words censored only when, in context, they mean `meaning` (see context.py)."""
+    patterns: list[Pattern]
+    meaning: str
+    fallback: list[Pattern]
+    innocent: str = ""
+    ask_twice: bool = False
+    unsure_mute: bool = False   # without the AI: mute every time (True) or only on a fallback phrase
+
+
+# Everyday words never muted on their own inside a listed phrase ("son of a bitch").
+_PHRASE_FILLER = frozenset("""a an the of you your yours my his her him me it its off on in up out to at for and
+or oh so get gets got getting make makes made making give gives gave giving kiss kisses go goes
+all some such what this that one""".split())
+
+
 class Matcher:
     def __init__(self, patterns: list[Pattern], allow: list[Pattern] | None = None,
-                 asterisks_as_hit: bool = True):
+                 asterisks_as_hit: bool = True, rules: list[ContextRule] | None = None, judge=None,
+                 vocab: list[Pattern] | None = None):
         self.patterns = patterns
+        self.vocab = vocab or []      # single listed words of every tier, to find a phrase's rude word
         self.allow = allow or []
         self.asterisks_as_hit = asterisks_as_hit
+        self.rules = rules or []
+        self.judge = judge
+
+    def prepare(self, texts: list[str]) -> None:
+        """Hand the film's subtitle lines to the context judge (neighbouring lines help it)."""
+        if self.judge is not None:
+            self.judge.prepare(texts)
 
     @classmethod
     def from_config(cls, cfg: dict) -> "Matcher":
@@ -131,10 +161,40 @@ class Matcher:
         patterns += [compile_pattern(p, "strong") for p in wcfg.get("extra", [])]
         allow = [compile_pattern(p, "allow") for p in load_default_allow() + list(wcfg.get("allow", []))]
         # Longest phrases first so "son of a bitch" wins over "bitch" at the same position.
+        ccfg = cfg.get("context", {})
+        rules = [ContextRule([compile_pattern(w, r.get("tier", "moderate")) for w in r.get("words", [])],
+                             str(r.get("meaning", "")),
+                             [compile_pattern(f, "allow") for f in r.get("fallback", [])],
+                             str(r.get("when_unsure", "keep")).lower() == "mute",
+                             str(r.get("innocent", "")), bool(r.get("ask_twice", False)))
+                 for r in ccfg.get("rules", []) if r.get("words") and r.get("meaning")]
+        # A word a rule names is judged in context instead of always censored ("bitch*"
+        # in a rule replaces "bitch*" in the list; "son of a bitch" stays as it is).
+        judged = {p.raw for r in rules for p in r.patterns}
+        patterns = [p for p in patterns if p.raw not in judged]
         patterns.sort(key=len, reverse=True)
-        return cls(patterns, allow, cfg.get("scan", {}).get("treat_asterisks_as_hit", True))
+        judge = None
+        if rules:
+            from .context import ContextJudge
+            judge = ContextJudge(cfg)
+        vocab = [compile_pattern(w, "vocab") for ws in tiers.values() for w in ws if len(w.split()) == 1]
+        vocab += [compile_pattern(w, "vocab") for w in wcfg.get("extra", []) if len(w.split()) == 1]
+        vocab += [p for r in rules for p in r.patterns if len(p) == 1]
+        return cls(patterns, allow, cfg.get("scan", {}).get("treat_asterisks_as_hit", True), rules, judge,
+                   vocab)
 
-    def _try(self, pattern: Pattern, words: list[str], i: int) -> bool:
+    def core(self, words: list[str], i: int, j: int) -> tuple[int, int]:
+        """The part of a listed phrase to mute: its rude words ("son of a [bitch]",
+        "god [damn]"), or failing that, its words other than everyday fillers."""
+        if j - i < 2:
+            return i, j
+        bad = [k for k in range(i, j) if any(self._try(v, words, k) for v in self.vocab)]
+        if not bad:
+            bad = [k for k in range(i, j) if words[k] not in _PHRASE_FILLER]
+        return (bad[0], bad[-1] + 1) if bad else (i, j)
+
+    @staticmethod
+    def _try(pattern: Pattern, words: list[str], i: int) -> bool:
         if i + len(pattern) > len(words):
             return False
         return all(_part_matches(part, words[i + k]) for k, part in enumerate(pattern.parts))
@@ -155,7 +215,16 @@ class Matcher:
                 if self._try(pattern, words, i):
                     j = i + len(pattern)
                     if not self._allowed(words, i, j):
-                        matches.append(Match(i, j, pattern, " ".join(words[i:j])))
+                        a, b = self.core(words, i, j)
+                        matches.append(Match(a, b, pattern, " ".join(words[i:j])))
+            if self.judge is not None and not any(m.start == i for m in matches):
+                for rule in self.rules:
+                    for pattern in rule.patterns:
+                        j = i + len(pattern)
+                        if self._try(pattern, words, i) and not self._allowed(words, i, j) \
+                                and self.judge.accept(words, i, j, rule):
+                            matches.append(Match(i, j, pattern, " ".join(words[i:j])))
+                            break
             if self.asterisks_as_hit and is_asterisked(words[i]) and not self._allowed(words, i, i + 1):
                 matches.append(Match(i, i + 1, Pattern(ASTERISK_PATTERN, "strong", ()), words[i]))
         return matches

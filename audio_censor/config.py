@@ -51,6 +51,15 @@ DEFAULTS: dict = {
         "channel": "center",           # center: hear only a surround track's dialogue channel | mix
         "recheck": True,               # re-listen to subtitle lines whose swear the transcript missed
     },
+    "context": {
+        # words rude in only one sense, judged in context by a local AI (see context.py);
+        # rules = [{words = ["balls", "nuts"], meaning = "testicles", fallback = [...]}]
+        "enabled": True,
+        "url": "http://127.0.0.1:11434",   # Ollama
+        "model": "gemma4:12b",
+        "timeout": 120,
+        "rules": [],
+    },
     "beep": {
         "mode": "duck",                # duck (lower the dialogue) | mute | beep
         "duck": 0.1,                   # dialogue level inside a span: 0.1 = -20 dB; also under a beep
