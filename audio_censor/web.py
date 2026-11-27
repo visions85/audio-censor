@@ -511,6 +511,65 @@ class App:
             self.pending.add(path)
         return {"ok": True, "phrase": phrase, "mute": mute}
 
+    # ---- voice review: hear each dubbed word's takes and approve one (see dub.py, [dub] review)
+
+    def _review(self, path: str) -> tuple[Path, dict, dict]:
+        from . import dub
+        store = dub.review_store(Path(path), self.cfg)
+        if store is None:
+            raise ValueError("dubbing keeps no takes here: set [dub] cache")
+        try:
+            doc = json.loads((store / dub.REVIEW).read_text())
+        except (OSError, ValueError):
+            doc = {"words": []}
+        return store, doc, dub.load_decisions(store)
+
+    def dub_review(self, path: str) -> dict:
+        """Every dubbable word of a film with its takes and your decision."""
+        store, doc, picks = self._review(path)
+        words, waiting = [], 0
+        for w in doc.get("words", []):
+            dec = picks.get(w["id"])
+            if dec is not None:
+                status = "approved" if dec.get("take") else "muted"
+            else:
+                status = "waiting" if doc.get("review") or not w.get("used") else "auto"
+                waiting += status == "waiting" and any(t["passed"] for t in w["takes"])
+            words.append({**{k: w[k] for k in ("id", "start", "end", "word", "alts", "line", "suggested", "used")},
+                          "status": status, "pick": dec.get("take") if dec else None,
+                          "takes": [{k: t[k] for k in ("id", "said", "engine", "passed", "natural")} for t in w["takes"]]})
+        return {"review": bool(doc.get("review")), "updated": doc.get("updated"), "waiting": waiting, "words": words,
+                "needs_rerender": path in self.pending.paths}
+
+    def dub_clip(self, path: str, wid: str, tid: str | None) -> bytes:
+        from . import dub
+        store, doc, _ = self._review(path)
+        word = next((w for w in doc.get("words", []) if w["id"] == wid), None)
+        if word is None:
+            raise KeyError(wid)
+        take = next((t for t in word["takes"] if t["id"] == tid), None) if tid else None
+        if tid and take is None:
+            raise KeyError(tid)
+        return dub.preview(word, take, store / "clips")
+
+    def dub_decide(self, body: dict) -> dict:
+        """Approve a take for a word (take = its id), keep it muted (take = null), or undo."""
+        from . import dub
+        path, wid = body["path"], body["word"]
+        store, doc, _ = self._review(path)
+        word = next((w for w in doc.get("words", []) if w["id"] == wid), None)
+        if word is None:
+            raise ValueError("that word is not in this film's review")
+        if body.get("undo"):
+            dub.forget_decision(store, wid)
+        else:
+            tid = body.get("take")
+            if tid and not any(t["id"] == tid for t in word["takes"]):
+                raise ValueError("that take is gone (re-render to make new ones)")
+            dub.save_decision(store, wid, tid or None)
+        self.pending.add(path)
+        return {"ok": True}
+
     def rerender(self, body: dict) -> dict:
         path = body["path"]
         if not Path(path).exists():
@@ -623,6 +682,10 @@ def make_handler(app: App, password: str | None):
                     return self._json(app.lib.stats())
                 if url.path == "/api/processed":
                     return self._json(app.processed())
+                if url.path == "/api/dub":
+                    return self._json(app.dub_review(q["path"]))
+                if url.path == "/api/dub/clip":
+                    return self._send(app.dub_clip(q["path"], q["word"], q.get("take") or None), "audio/mpeg", cache=True)
                 if url.path == "/img":
                     found = app.image(q.get("id", ""))
                     if not found:
@@ -647,6 +710,8 @@ def make_handler(app: App, password: str | None):
                     return self._json(app.correct(body))
                 if url.path == "/api/rerender":
                     return self._json(app.rerender(body))
+                if url.path == "/api/dub/decide":
+                    return self._json(app.dub_decide(body))
                 if url.path == "/api/clean":
                     return self._json(app.make_clean(body))
                 if url.path == "/api/cancel":

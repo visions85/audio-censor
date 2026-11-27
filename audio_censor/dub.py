@@ -66,6 +66,8 @@ ROOM = 0.35        # a longer swap may run this far into the pause after the wor
 GAP = 0.06         # ... leaving at least this much of the pause before the next word
 SWALLOW = 0.03     # an edit this far into a neighbouring word takes the whole word
 CLOSE = 0.05       # takes this close to the most natural one count as just as good
+REVIEW = "review.json"        # in a film's take store: every word's takes, for the web page
+DECISIONS = "decisions.json"  # ... and which take you approved for each word (or mute)
 VERSION = 3        # bump when the worker's output changes, so cached takes are remade
 
 
@@ -245,16 +247,29 @@ def _to16k(x, rate: int):
     return np.frombuffer(r.stdout, np.float32)
 
 
-def score(heard: list, alt: str, old: str, t0: float, t1: float, min_prob: float) -> tuple[bool, float]:
-    """Whisper's words (start, end, text, probability) near the dubbed word -> (passes, score)."""
+def score(heard: list, alt: str, old: str, t0: float, t1: float, min_prob: float,
+          also: list[str] | tuple = ()) -> tuple[bool, float]:
+    """Whisper's words (start, end, text, probability) near the dubbed word -> (passes, score).
+
+    `also` lists what Whisper may write for a replacement it does not know ([dub.heard]:
+    "Nee-Doh" is heard as "neato"); the old word must still not be heard at all."""
     near = [w for w in heard if w[1] > t0 - 0.3 and w[0] < t1 + 0.3]
-    target = norm(alt)
     joined = "".join(norm(w[2]) for w in near)
-    probs = [w[3] for w in near if norm(w[2]) and norm(w[2]) in target]
-    p = (sum(probs) / len(probs)) if probs and target in joined else 0.0
+    p = 0.0
+    for target in [norm(alt)] + [norm(a) for a in also]:
+        probs = [w[3] for w in near if norm(w[2]) and norm(w[2]) in target]
+        if target and probs and target in joined:
+            p = max(p, sum(probs) / len(probs))
     o = norm(old)
     old_heard = any(norm(w[2]).startswith(o) or (len(o) > 3 and o[:4] in norm(w[2])) for w in near)
     return (p >= min_prob and not old_heard), p - (1.0 if old_heard else 0.0)
+
+
+def heard_as(d: dict, alt: str) -> list[str]:
+    """[dub.heard]: what Whisper may write for replacement `alt` (any capitals)."""
+    table_ = {norm(k): v for k, v in (d.get("heard") or {}).items()}
+    v = table_.get(norm(alt), [])
+    return [v] if isinstance(v, str) else [str(x) for x in v]
 
 
 def natural(take: dict) -> float:
@@ -493,7 +508,7 @@ class _Takes:
         live = {self.key(i, n, s) for i in self.entries for n in names
                 for s in (None, retry_seeds(self.d, n) or None)}
         for f in self.store.glob("*.json"):
-            if f.stem not in live:
+            if f.stem not in live and f.name not in (REVIEW, DECISIONS):
                 f.unlink(missing_ok=True)
                 shutil.rmtree(self.store / f.stem, ignore_errors=True)
 
@@ -519,7 +534,8 @@ def _check(items: list[Item], wins: dict, takes: dict[int, list[dict]], cfg: dic
             heard = [(w.start, w.end, w.word, w.probability) for sg in segs for w in (sg.words or [])]
             off = a / rate
             t1 = max(t0 + it.span.duration, (take["start"] + len(delta)) / rate - 0.03)
-            ok, sc = score(heard, take["said"], it.word, t0 - off, t1 - off, min_prob)
+            ok, sc = score(heard, take["said"], it.word, t0 - off, t1 - off, min_prob,
+                           heard_as(cfg.get("dub", {}), take["said"]))
             if ok:
                 passing.setdefault(it.index, []).append({**take, "score": sc})
     return passing
@@ -582,6 +598,27 @@ def prepare(media: Path, stream: int, rate: int, duration: float, spans: list[Sp
             more(name)
     store.tidy(main + fall)
     chosen = choose(items, passing)
+    # your decisions (the web page's voice review) win over the automatic pick; in review mode
+    # ([dub] review) a word is dubbed only once you approved a take for it, else it is muted
+    review = bool(d.get("review", False))
+    picks = load_decisions(store.store)
+    by_id = {t_id(t): t for ts in store.takes.values() for t in ts}
+    how: dict[int, str] = {}
+    for it in items:
+        dec = picks.get(word_id(it))
+        if dec is not None:
+            take = by_id.get(dec.get("take") or "")
+            if dec.get("take") and take is not None:
+                chosen[it.index], how[it.index] = take, "approved"
+            else:
+                chosen.pop(it.index, None)
+                how[it.index] = "muted by you" if not dec.get("take") else "your take is gone; muted"
+        elif review:
+            if it.index in chosen:
+                how[it.index] = "waiting for your OK"
+            chosen.pop(it.index, None)
+    _save_window_audio(store, items, wins, rate)
+    write_review(store, items, passing, chosen, review, rate)
 
     # the change track: zero everywhere except the dubbed words
     notes = []
@@ -590,13 +627,21 @@ def prepare(media: Path, stream: int, rate: int, duration: float, spans: list[Sp
         made = store.takes.get(it.index, [])
         notes.append({"start": round(it.span.start, 3), "word": it.word, "said": take["said"] if take else None,
                       "takes": len(made), "passed": len(passing.get(it.index, [])),
-                      **({"natural": round(natural(take), 3), "engine": take.get("engine", "f5")} if take else {})})
+                      **({"natural": round(natural(take), 3), "engine": take.get("engine", "f5")} if take else {}),
+                      **({"review": how[it.index]} if it.index in how else {})})
+        tag = f" [{how[it.index]}]" if it.index in how else ""
         if take:
             eprint(f"  dub: {it.span.start:7.1f}s {it.word!r} -> {take['said']!r}"
-                   f"  ({len(passing[it.index])}/{len(made)} takes passed; {take.get('engine', 'f5')},"
-                   f" voice {take.get('voice', '?')}, edges {take.get('edge_db', '?')} dB)")
+                   f"  ({len(passing.get(it.index, []))}/{len(made)} takes passed; {take.get('engine', 'f5')},"
+                   f" voice {take.get('voice', '?')}, edges {take.get('edge_db', '?')} dB){tag}")
+        elif tag:
+            eprint(f"  dub: {it.span.start:7.1f}s {it.word!r}: muted{tag}")
         else:
             eprint(f"  dub: {it.span.start:7.1f}s {it.word!r}: no take sounded right; muted instead")
+    if review:
+        waiting = sum(1 for h in how.values() if h == "waiting for your OK")
+        eprint(f"  dub: review: {sum(1 for h in how.values() if h == 'approved')} approved by you, "
+               f"{waiting} waiting for your OK on the web page (muted until then)")
     if not chosen:
         return DubResult(None, {}, notes)
     patches = []
@@ -609,6 +654,114 @@ def prepare(media: Path, stream: int, rate: int, duration: float, spans: list[Sp
     out = work / "dub-delta.flac"
     write_delta(out, patches, int((duration + 2) * rate), rate)
     return DubResult(out, {i: t["said"] for i, t in chosen.items()}, notes)
+
+
+def word_id(it: Item) -> str:
+    """Names a muted word across runs: its time and the word."""
+    return f"{it.span.start:.2f}:{norm(it.word)}"
+
+
+def t_id(take: dict) -> str:
+    """Names a take across runs: its store key and file."""
+    return f"{take.get('key', '')}/{Path(take['delta']).name}"
+
+
+def review_store(media: Path, cfg: dict) -> Path | None:
+    """The film's take store, where its review and your decisions live (None without a cache)."""
+    d = cfg.get("dub", {})
+    if not d.get("cache"):
+        return None
+    return Path(str(d["cache"])).expanduser() / "takes" / re.sub(r"[^A-Za-z0-9]+", "-", media.stem)[:60]
+
+
+def load_decisions(store: Path) -> dict:
+    try:
+        return json.loads((store / DECISIONS).read_text()).get("words", {})
+    except (OSError, ValueError):
+        return {}
+
+
+def save_decision(store: Path, wid: str, take: str | None) -> None:
+    """Approve `take` for word `wid`, or None: keep it muted."""
+    import time
+    store.mkdir(parents=True, exist_ok=True)
+    words = load_decisions(store)
+    words[wid] = {"take": take, "at": time.strftime("%Y-%m-%dT%H:%M:%S")}
+    tmp = store / (DECISIONS + ".tmp")
+    tmp.write_text(json.dumps({"words": words}, indent=1))
+    tmp.replace(store / DECISIONS)
+
+
+def forget_decision(store: Path, wid: str) -> None:
+    words = load_decisions(store)
+    if words.pop(wid, None) is not None:
+        (store / DECISIONS).write_text(json.dumps({"words": words}, indent=1))
+
+
+def _save_window_audio(store: "_Takes", items: list[Item], wins: dict, rate: int) -> None:
+    """The front speakers around each word (FL, FR, FC), kept so the web page can play takes."""
+    for it in items:
+        f = store.store / store.keys[it.index] / "window.flac"
+        if f.exists():
+            continue
+        f.parent.mkdir(parents=True, exist_ok=True)
+        subprocess.run(["ffmpeg", "-v", "error", "-y", "-f", "f32le", "-ar", str(rate), "-ac", "3", "-i", "-",
+                        "-c:a", "flac", "-sample_fmt", "s32", str(f)], input=wins[it.index].astype("float32").tobytes(),
+                       check=False, capture_output=True)
+
+
+def write_review(store: "_Takes", items: list[Item], passing: dict, chosen: dict, review: bool, rate: int) -> None:
+    """Every word's takes, for the web page's voice review."""
+    import time
+    words = []
+    for it in sorted(items, key=lambda x: x.span.start):
+        ok = {t_id(t) for t in passing.get(it.index, [])}
+        takes = []
+        for t in store.takes.get(it.index, []):
+            takes.append({"id": t_id(t), "said": t["said"], "engine": t.get("engine", "f5"), "passed": t_id(t) in ok,
+                          "natural": round(natural(t), 3), "voice": t.get("voice"), "edge_db": t.get("edge_db"),
+                          "delta": t["delta"], "start": t["start"]})
+        takes.sort(key=lambda t: (not t["passed"], -t["natural"]))
+        crop = it.texts[it.alts[0]] if it.alts and it.alts[0] in it.texts else ""
+        auto = choose([it], {it.index: passing.get(it.index, [])}).get(it.index)
+        words.append({"id": word_id(it), "start": it.span.start, "end": it.span.end, "word": it.word,
+                      "alts": it.alts, "line": crop, "win_start": it.win_start,
+                      "window": str(store.store / store.keys[it.index] / "window.flac"), "rate": rate,
+                      "suggested": t_id(auto) if auto else None,
+                      "used": t_id(chosen[it.index]) if it.index in chosen else None, "takes": takes})
+    tmp = store.store / (REVIEW + ".tmp")
+    tmp.write_text(json.dumps({"review": review, "updated": time.strftime("%Y-%m-%dT%H:%M:%S"), "words": words}))
+    tmp.replace(store.store / REVIEW)
+
+
+def preview(word: dict, take: dict | None, cache: Path, before: float = 2.5, after: float = 1.5) -> bytes:
+    """An MP3 of the line around a review word, as the front speakers play it: the original
+    (take None) or with that take swapped in. Cached in `cache`."""
+    import hashlib
+    import numpy as np
+    name = hashlib.sha1(f"{word['id']}|{take['id'] if take else 'original'}".encode()).hexdigest()[:16] + ".mp3"
+    f = cache / name
+    if f.exists():
+        return f.read_bytes()
+    rate = int(word["rate"])
+    raw = subprocess.run(["ffmpeg", "-v", "error", "-i", word["window"], "-f", "f32le", "-ac", "3", "-ar", str(rate), "-"],
+                         capture_output=True, check=False)
+    if raw.returncode != 0 or not raw.stdout:
+        raise MediaError("this word's audio is not saved yet (it is kept from the next render on)")
+    win = np.frombuffer(raw.stdout, np.float32).reshape(-1, 3).copy()
+    if take:
+        win = apply(win, np.load(take["delta"]), int(take["start"]))
+    a = max(0, int((word["start"] - word["win_start"] - before) * rate))
+    b = min(len(win), int((word["end"] - word["win_start"] + after) * rate))
+    x = win[a:b]
+    st = np.stack([x[:, 0] + 0.707 * x[:, 2], x[:, 1] + 0.707 * x[:, 2]], axis=1)
+    st = st / max(1.0, float(np.abs(st).max()) / 0.98)
+    enc = subprocess.run(["ffmpeg", "-v", "error", "-f", "f32le", "-ar", str(rate), "-ac", "2", "-i", "-",
+                          "-c:a", "libmp3lame", "-b:a", "160k", "-f", "mp3", "-"], input=st.astype(np.float32).tobytes(),
+                         capture_output=True, check=True).stdout
+    cache.mkdir(parents=True, exist_ok=True)
+    f.write_bytes(enc)
+    return enc
 
 
 def _store(media: Path, d: dict, work: Path) -> Path:

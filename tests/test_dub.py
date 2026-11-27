@@ -1,4 +1,5 @@
 import numpy as np
+import re
 from pathlib import Path
 
 from audio_censor import dub
@@ -237,3 +238,67 @@ def test_an_edit_takes_a_neighbour_it_reaches_into_and_stops_at_one_it_grazes():
     shit, look = Word(10.0, 10.3, "shit"), Word(10.32, 10.6, "look")
     lo, hi = dub._edit_bounds(shit, Span(9.95, 10.34, ["shit"], ["asr"]), [shit, look])
     assert hi == look.start and lo == 9.95
+
+
+def test_a_made_up_word_passes_when_whisper_hears_it_as_listed():
+    heard = [(0.0, 0.3, " your", 0.99), (0.35, 0.7, " neato", 0.87), (0.7, 0.8, " a", 0.98)]
+    assert not dub.score(heard, "Nee-Doh", "nuts", 0.35, 0.7, 0.5)[0]
+    d = {"heard": {"nee-doh": ["neato", "knee doe"]}}
+    assert dub.heard_as(d, "Nee-Doh") == ["neato", "knee doe"]
+    assert dub.score(heard, "Nee-Doh", "nuts", 0.35, 0.7, 0.5, dub.heard_as(d, "Nee-Doh"))[0]
+    nuts = heard + [(0.7, 0.9, " nuts", 0.9)]
+    assert not dub.score(nuts, "Nee-Doh", "nuts", 0.35, 0.7, 0.5, ["neato"])[0]     # the old word still fails it
+
+
+def _fake_engines(monkeypatch, passes):
+    """Stand-in workers and hearing check: `passes(word index, take)` says which takes pass."""
+    monkeypatch.setattr(dub, "_windows", lambda m, s, items, r: {it.index: np.zeros((20000, 3), np.float32) for it in items})
+
+    def worker(py, script, job, work, name):
+        out = Path(job["out"])
+        out.mkdir(parents=True, exist_ok=True)
+        res = []
+        for it in job["items"]:
+            if name == "voice":
+                res.append({"id": it["id"], "voices": [0.5 for _ in it["takes"]]})
+                continue
+            r = {"id": it["id"], "takes": []}
+            np.save(out / f"v{it['id']}.npy", np.zeros(20000, np.float32))
+            r["voice"] = str(out / f"v{it['id']}.npy")
+            for alt in it["texts"]:
+                f = out / f"{name}{it['id']}{re.sub('[^a-z]', '', alt)}.npy"
+                np.save(f, np.ones(10, np.float32))
+                r["takes"].append({"said": alt, "seed": 1, "delta": str(f), "start": 0, "edge_db": 1.0, "voice": 0.6})
+            res.append(r)
+        return res
+    monkeypatch.setattr(dub, "_run_worker", worker)
+    monkeypatch.setattr(dub, "_check", lambda items, wins, takes, cfg, r: {
+        i: [{**t, "score": 0.9} for t in ts if passes(i, t)] for i, ts in takes.items() if any(passes(i, t) for t in ts)})
+    monkeypatch.setattr(dub, "write_delta", lambda *a, **k: None)
+    monkeypatch.setattr(dub, "_save_window_audio", lambda *a, **k: None)
+
+
+def test_review_mode_dubs_only_what_you_approved(tmp_path, monkeypatch):
+    import json
+    words = _words("oh shit look out you jackass run")
+    spans = [Span(words[1].start, words[1].end, ["shit"], ["asr"]), Span(words[5].start, words[5].end, ["jackass"], ["asr"])]
+    media = tmp_path / "film.mkv"
+    media.write_bytes(b"x")
+    _fake_engines(monkeypatch, lambda i, t: t["said"] != "crud")
+    cfg = {"dub": {"python": "py", "cache": str(tmp_path / "c"), "review": True}}
+    res = dub.prepare(media, 0, 1000, 30.0, spans, words, cfg, tmp_path)
+    assert res.dubbed == {} and {n["review"] for n in res.notes} == {"waiting for your OK"}    # nothing yet
+    store = dub.review_store(media, cfg)
+    doc = json.loads((store / dub.REVIEW).read_text())
+    shit, jack = doc["words"]
+    crud = next(t for t in shit["takes"] if t["said"] == "crud")
+    assert not crud["passed"] and shit["takes"][0]["passed"]           # good takes first
+    dub.save_decision(store, shit["id"], crud["id"])                   # your ear over the check
+    dub.save_decision(store, jack["id"], None)                         # keep this one muted
+    res = dub.prepare(media, 0, 1000, 30.0, spans, words, cfg, tmp_path)
+    assert res.dubbed == {0: "crud"}
+    assert [n["review"] for n in res.notes] == ["approved", "muted by you"]
+    cfg["dub"]["review"] = False                                       # without review mode: auto, unless you decided
+    dub.forget_decision(store, jack["id"])
+    res = dub.prepare(media, 0, 1000, 30.0, spans, words, cfg, tmp_path)
+    assert res.dubbed[0] == "crud" and 1 in res.dubbed

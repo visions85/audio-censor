@@ -69,9 +69,11 @@ DEFAULTS: dict = {
         "seeds": [1, 2],
         "cfg": [2.0, 3.0],            # takes per replacement = seeds x cfg
         "min_prob": 0.5,              # Whisper must hear the new word at least this surely
+        "review": False,              # True: dub a word only after you approve a take on the web page
         "retry": 4,                   # words with no good take: this many new seeds per engine (0 = off)
         "tone": True,                 # give takes the film's own treble and tone
         "words": {},                  # word -> [replacements]; empty = the built-in table
+        "heard": {},                  # replacement -> what Whisper may write for it ("Nee-Doh" = ["neato"])
         "playdiffusion": {"python": "", "seeds": [1, 2, 3, 4], "steps": 30},
         "auk": {"python": "", "ckpts": "", "seeds": [1, 2]},   # ckpts: folder with AuK/ and Qwen2.5-Omni-3B/
     },

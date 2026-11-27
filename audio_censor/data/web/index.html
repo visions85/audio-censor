@@ -93,6 +93,24 @@ button.small { padding: 2px 8px; font-size: 12.5px; white-space: nowrap; }
   background: color-mix(in srgb, var(--pend) 16%, transparent); }
 .rerender span { flex: 1; }
 .rerender[hidden] { display: none; }
+.voices { margin: 10px 0 4px; }
+.voices .lead { margin: 4px 0 8px; }
+.vword { border-top: 1px solid var(--line); padding: 10px 0; }
+.vhead { display: flex; gap: 10px; align-items: baseline; flex-wrap: wrap; }
+.vhead .line { flex: 1 1 320px; }
+.vhead .badge { margin-top: 0; }
+.badge.approved { background: color-mix(in srgb, var(--ok) 18%, transparent); color: var(--ok); }
+.badge.waiting { background: color-mix(in srgb, var(--pend) 20%, transparent); color: var(--pend); }
+.vtakes { display: flex; flex-wrap: wrap; gap: 6px; margin-top: 8px; align-items: center; }
+.take { display: inline-flex; border: 1px solid var(--line); border-radius: 8px; overflow: hidden; }
+.take.on { border-color: var(--accent); box-shadow: 0 0 0 1px var(--accent); }
+.take button { border: 0; border-radius: 0; background: none; color: var(--ink); padding: 4px 9px; font: inherit; font-size: 13px; cursor: pointer; }
+.take button + button { border-left: 1px solid var(--line); }
+.take .use { color: var(--accent); font-weight: 600; }
+.take.failed button:first-child { color: var(--muted); }
+button.playing { background: var(--chip) !important; }
+.vtakes details { flex-basis: 100%; }
+.vtakes summary { cursor: pointer; color: var(--muted); font-size: 13px; }
 .toast { position: fixed; bottom: 18px; left: 50%; transform: translateX(-50%); background: var(--ink); color: var(--bg); padding: 9px 16px; border-radius: 9px; opacity: 0; transition: opacity .2s; pointer-events: none; z-index: 20; }
 .toast.on { opacity: 1; }
 </style>
@@ -237,7 +255,7 @@ function marked(line) {
 }
 function rerenderBanner(path, needs) {
   return `<div class="rerender" data-path="${esc(path || "")}" ${needs ? "" : "hidden"}>
-    <span>Corrected since this clean version was made. Re-render to apply.</span>
+    <span>Changed since this clean version was made (a correction or a voice choice). Re-render to apply.</span>
     <button class="primary" onclick="rerender(this)">Re-render now</button></div>`;
 }
 function movieBody(d, path, needs) {
@@ -247,6 +265,7 @@ function movieBody(d, path, needs) {
   const dubs = {}; for (const x of (d.dub || [])) if (x.said) dubs[x.start.toFixed(2)] = x.said;
   const nDub = Object.keys(dubs).length;
   let html = rerenderBanner(path, needs) + `<h3>Muted (${spans.length})${nDub ? ` · ${nDub} dubbed` : ""}</h3>`;
+  if ((d.dub || []).length && path) html += `<div class="voices" data-path="${esc(path)}"><button class="ghost" onclick="loadVoices(this.closest('.voices'))">Review dubbed voices</button></div>`;
   html += spans.length ? `<table><thead><tr><th>Time</th><th class="num">Length</th><th>Word</th><th>Found by</th></tr></thead><tbody>` +
     spans.map(s => `<tr><td>${fmt(s.start)}</td><td class="num">${(s.end - s.start).toFixed(1)} s</td><td>${esc((s.words || []).join(", "))}${
       dubs[(+s.start).toFixed(2)] ? ` <span class="muted">→ said “${esc(dubs[(+s.start).toFixed(2)])}”</span>` : ""}</td>
@@ -320,6 +339,63 @@ async function correct(btn) {
     if (banner) banner.hidden = false;
     toast(`Saved: ${mute ? "mute" : "keep"} "${phrase.replace(/\[\[|\]\]/g, "")}"`);
   } catch (e) { toast(e.message); }
+}
+// ---- voice review: hear every take of a dubbed word and approve one (or keep it muted)
+let player = null, playingBtn = null;
+function play(btn) {
+  const box = btn.closest(".voices"), w = btn.closest(".vword");
+  if (playingBtn === btn && player && !player.paused) { player.pause(); btn.classList.remove("playing"); playingBtn = null; return; }
+  if (player) player.pause();
+  if (playingBtn) playingBtn.classList.remove("playing");
+  const q = new URLSearchParams({path: box.dataset.path, word: w.dataset.word, take: btn.dataset.take || ""});
+  player = new Audio(`/api/dub/clip?${q}`);
+  player.onended = () => { btn.classList.remove("playing"); playingBtn = null; };
+  player.onerror = () => { btn.classList.remove("playing"); toast("Could not play that clip"); };
+  btn.classList.add("playing"); playingBtn = btn;
+  player.play().catch(() => {});
+}
+const VSTATUS = {approved: "Approved", muted: "Muted (your choice)", waiting: "Waiting for you", auto: "Picked automatically"};
+async function loadVoices(box) {
+  box.innerHTML = `<p class="muted">Loading the takes…</p>`;
+  try { renderVoices(box, await api(`/api/dub?path=${encodeURIComponent(box.dataset.path)}`)); }
+  catch (e) { box.innerHTML = `<p class="muted">${esc(e.message)}</p>`; }
+}
+function takeChip(w, t) {
+  const tag = t.id === w.suggested ? " ★" : "";
+  return `<span class="take ${t.id === w.pick ? "on" : ""} ${t.passed ? "" : "failed"}" title="${esc(t.engine)} · naturalness ${t.natural}${t.passed ? "" : " · failed the hearing check"}">
+    <button data-take="${esc(t.id)}" onclick="play(this)">▶ ${esc(t.said)}${tag}</button>
+    <button class="use" data-take="${esc(t.id)}" onclick="decide(this)">${t.id === w.pick ? "Approved" : "Use"}</button></span>`;
+}
+function renderVoices(box, data) {
+  if (!data.words.length) { box.innerHTML = `<p class="muted">No takes saved for this film yet. They are kept from its next render on.</p>`; return; }
+  const lead = data.review
+    ? `Review mode: a word is dubbed only after you approve one of its takes; until then it stays muted.`
+    : `Your choices here replace the automatic pick.`;
+  box.innerHTML = `<h3>Dubbed voices</h3><p class="muted lead">${lead} ▶ plays the line; ★ is the automatic pick. After choosing, re-render to put your choices in the film.${data.waiting ? ` <b>${data.waiting} waiting for you.</b>` : ""}</p>` +
+    data.words.map(w => {
+      const good = w.takes.filter(t => t.passed), bad = w.takes.filter(t => !t.passed);
+      const line = esc(w.line).replace(esc(w.alts[0] || "\u0000"), `<mark>${esc(w.word.replace(/[^\w' -]/g, ""))}</mark>`);
+      return `<div class="vword" data-word="${esc(w.id)}">
+        <div class="vhead"><b>${fmt(w.start)}</b><span class="line">${line}</span><span class="badge ${w.status}">${VSTATUS[w.status] || w.status}</span></div>
+        <div class="vtakes"><button class="ghost small" data-take="" onclick="play(this)">▶ Original</button>
+          ${good.slice(0, 8).map(t => takeChip(w, t)).join("")}
+          ${good.length ? "" : `<span class="muted">No take passed the hearing check.</span>`}
+          <button class="ghost small" onclick="decide(this, true)">${w.status === "muted" ? "Kept muted" : "Keep muted"}</button>
+          ${w.status === "approved" || w.status === "muted" ? `<button class="ghost small" onclick="decide(this, false, true)">Undo</button>` : ""}
+          ${good.length > 8 || bad.length ? `<details><summary>${good.length > 8 ? `${good.length - 8} more good take(s)` : ""}${good.length > 8 && bad.length ? " · " : ""}${bad.length ? `${bad.length} that failed the hearing check` : ""}</summary>
+            <div class="vtakes">${good.slice(8).concat(bad).map(t => takeChip(w, t)).join("")}</div></details>` : ""}
+        </div></div>`;
+    }).join("");
+}
+async function decide(btn, mute, undo) {
+  const box = btn.closest(".voices"), w = btn.closest(".vword");
+  btn.disabled = true;
+  try {
+    await api("/api/dub/decide", {path: box.dataset.path, word: w.dataset.word, take: mute ? null : (btn.dataset.take || null), undo: !!undo});
+    const banner = dlg.querySelector(`.rerender[data-path="${CSS.escape(box.dataset.path)}"]`);
+    if (banner) banner.hidden = false;
+    await loadVoices(box);
+  } catch (e) { toast(e.message); btn.disabled = false; }
 }
 async function rerender(btn) {
   const box = btn.closest(".rerender");
