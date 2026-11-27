@@ -73,3 +73,12 @@ def test_without_sudo_it_warns_and_carries_on(knob, monkeypatch, capsys):
     with thrash.relaxed(True):
         pass
     assert "could not lower" in capsys.readouterr().err and f.read_text().strip() == "100"
+
+
+def test_a_step_inside_a_run_does_not_restore_it_for_the_run(knob):
+    f, writes, _ = knob
+    with thrash.relaxed(True):                          # the whole run
+        with thrash.relaxed(True):                      # a heavy step inside it (the AuK load)
+            assert f.read_text().strip() == "0"
+        assert f.read_text().strip() == "0"             # still off for the rest of the run
+    assert f.read_text().strip() == "100" and writes == [0, 100]

@@ -77,8 +77,12 @@ def _locked_state() -> Iterator[dict]:
 
 
 def _release(state: dict, pid: int | None) -> None:
-    """Drop `pid` (and any dead holders); restore the original when nobody holds it."""
-    holders = [p for p in state.get("holders", []) if p != pid and _alive(p)]
+    """Drop one hold of `pid` (a process may hold it twice: a run, and a step inside it) and any
+    dead holders; restore the original when nobody holds it."""
+    holders = list(state.get("holders", []))
+    if pid in holders:
+        holders.remove(pid)
+    holders = [p for p in holders if _alive(p)]
     state["holders"] = holders
     if not holders and "original" in state:
         original = int(state["original"])

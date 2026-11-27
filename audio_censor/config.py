@@ -58,15 +58,22 @@ DEFAULTS: dict = {
     },
     "dub": {
         # say a family word in the actor's voice instead of muting (see dub.py); needs a
-        # separate model environment with f5-tts and demucs: python = its Python
+        # separate model environment with f5-tts and demucs: python = its Python. It also
+        # separates the voice and scores takes for the other engines.
         "enabled": False,
         "python": "",
+        "engines": ["f5"],            # tried for every word: f5, playdiffusion, auk
+        "fallback": [],               # tried only for words none of those could do (e.g. ["auk"])
         "cache": "",                  # where that environment keeps its model downloads
         "steps": 32,
         "seeds": [1, 2],
         "cfg": [2.0, 3.0],            # takes per replacement = seeds x cfg
         "min_prob": 0.5,              # Whisper must hear the new word at least this surely
+        "retry": 4,                   # words with no good take: this many new seeds per engine (0 = off)
+        "tone": True,                 # give takes the film's own treble and tone
         "words": {},                  # word -> [replacements]; empty = the built-in table
+        "playdiffusion": {"python": "", "seeds": [1, 2, 3, 4], "steps": 30},
+        "auk": {"python": "", "ckpts": "", "seeds": [1, 2]},   # ckpts: folder with AuK/ and Qwen2.5-Omni-3B/
     },
     "context": {
         # words rude in only one sense, judged in context by a local AI (see context.py);
